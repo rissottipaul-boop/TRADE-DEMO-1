@@ -5,14 +5,17 @@
     python -m src.pump_scanner --no-journal              # без строки в data/pump_journal.jsonl
     python -m src.pump_scanner --at 2026-09-24T09:47+05:00 --pairs OKB-USDT LTC-USDT
                                                          # повтор прошлого скана
+    python -m src.pump_scanner --no-liquidity …          # без проверки ликвидности
 
 Методика — скилл spot-momentum-scan-validate, фаза 1 «только скан», в редакции скана №5
-Pump Risk Taker (insights/pump-scan-2026-09-24.md, 09:47+05). Кандидат сканера — не сделка:
-вход, сайзинг, стоп и проверку ликвидности решает Pump Risk Taker по pump-pocket.json.
+Pump Risk Taker (insights/pump-scan-2026-09-24.md, 09:47+05), и проверка ликвидности кандидата
+(PUMP-LIQ, раздел «Ликвидность»). Кандидат сканера — не сделка: вход, сайзинг и стоп решает
+Pump Risk Taker по pump-pocket.json.
 
 Данные — только публичные GET, без ключей (других запросов opener не пропускает):
 - GET /api/v5/market/tickers?instType=SPOT — универсум;
-- GET /api/v5/market/candles — свечи живого скана; /market/history-candles — повтор (--at).
+- GET /api/v5/market/candles — свечи живого скана; /market/history-candles — повтор (--at);
+- GET /api/v5/market/books?instId=…&sz=400 — стакан кандидатов и почти кандидатов.
 Лента (--feed): demo (по умолчанию) — заголовок x-simulated-trading: 1, как `okx --demo`
 в сканах №1–5; live — без заголовка. Demo-свечи строятся из сделок demo: бывают плоские бары
 без сделок и выбросы объёма ×1000 (insights/okx-api.md §10 п.8), поэтому объём — к медиане.
@@ -37,8 +40,39 @@ vol в базовой валюте. Меньше 30 закрытых свече�
   vol× — по медиане.
 
 Кандидат — все пять условий (пороги — параметры CLI): импульс ≥ 1.5 %, vol× (медиана) ≥ 1.5,
-50 ≤ RSI ≤ 72, close > MA20, MACD-гистограмма > 0. Кандидаты — по убыванию score; «почти
-кандидаты» — не выполнено ровно одно условие; у каждой пары — список невыполненных условий.
+50 ≤ RSI ≤ 72, close > MA20, MACD-гистограмма > 0, и ликвидность (ниже). Кандидаты — по
+убыванию score; illiquid — пять условий выполнены, ликвидность — нет; «почти кандидаты» — не
+выполнено ровно одно условие; у каждой пары — список невыполненных условий.
+
+Ликвидность (PUMP-LIQ) — у кандидатов и «почти кандидатов», против лимита позиции кармана
+P = max_position_pct из pump-pocket.json (только чтение; имя поля историческое, значение — сумма
+в USDT, 10% бюджета). Три условия, границы включительно, пороги — параметры CLI:
+  depth     глубина ask ≥ --depth-min × P: Σ px × sz уровней ask от лучшего ask до +--liq-band %
+            (объём, который съест покупка); стакан — market/books, 400 уровней, лента --feed;
+  spread    спред (ask − bid) / mid ≤ --spread-max %;
+  turnover  оборот последней закрытой свечи (volCcyQuote) ≥ --turnover-min × P.
+Кандидат, не прошедший хоть одно условие, получает статус illiquid с причинами и в кандидаты не
+попадает; «почти кандидат» остаётся near, итог проверки — в его поле liquidity. Пара с котировкой
+не USDT — illiquid: лимит кармана задан в USDT. Повтор --at: исторического стакана у OKX нет —
+depth и spread не проверяются (пометка в notes), turnover проверяется; лимит P — из текущего
+pump-pocket.json. Файла кармана нет или он не читается — проверка пропускается с предупреждением
+в warnings, скан не падает. --no-liquidity — выключить проверку (повтор прошлых сканов как они
+были). Ошибка запроса стакана — ошибка скана (код 2), как у свечей.
+
+Пороги по умолчанию воспроизводят решение скана №4 (08:42+05). IMX-USDT прошёл фильтр (+2.51%,
+3.98× медианы, RSI 57.8, > MA20, MACD > 0), и агент отклонил его по ликвидности: оборот свечи
+1 569 USDT = 1.51 P; в демо-стакане ≈ 2.2k USDT по ask до +3.2% = 2.12 P, на лучшем уровне
+≈ 0.9 USDT, «позиция съела бы половину книги»; P = 1 036.29 USDT.
+  --liq-band 1      покупка на P исполняется не дальше +1% от лучшего ask — меньше минимального
+                    стопа кармана (stop_loss_range, 1.5%);
+  --depth-min 3     позиция — не больше трети глубины полосы: средняя цена входа — в первой трети
+                    полосы, запас на изменение книги до входа. IMX: ≤ 2.2k USDT в любой полосе
+                    до +3.2% < 3 P = 3.1k → illiquid (при 2 P = 2.07k он прошёл бы по полосе 3.2%);
+  --turnover-min 5  позиция — не больше 20% оборота часа сигнала. IMX: 1.51 P < 5 P → illiquid и
+                    в повторе без стакана; COMP-USDT того же скана (≈ 23.5k USDT/ч = 22.7 P,
+                    отклонён по объёму, не по ликвидности) проходит с запасом;
+  --spread-max 0.5  спред платится за круг (вход по ask, выход по bid): 0.5% — треть минимального
+                    стопа 1.5%, вместе с комиссией taker 2 × 0.1% — меньше половины стопа.
 
 Повтор (--at ВРЕМЯ --pairs …): свечи из history-candles, закрытые к моменту --at
 (open + 1 ч ≤ --at; запрос after = --at − 1 ч + 1 мс). Время — ISO с поясом. Тикеров на
@@ -60,13 +94,25 @@ vol в базовой валюте. Меньше 30 закрытых свече�
   universe    {source: "tickers"|"pairs", tickers, usdt_pairs, non_stable, eligible, top_n,
                exclude} — числа отбора (для pairs — только source и eligible)
   pairs       проверенные пары: с ts, bars и feed дают команду повтора (--at ts --pairs …)
-  counts      {scanned, candidates, near, insufficient, stale}
+  counts      {scanned, candidates, near, insufficient, stale}; illiquid и rejected сюда не
+              входят — число illiquid = длина списка illiquid
+  liquidity   настройки проверки ликвидности: {enabled, pocket, position_usdt, band_pct,
+              depth_min, turnover_min, spread_max, book, book_levels, note}; enabled=false —
+              не проверялась (note — почему), book=false — без стакана (повтор)
   candidates  [{inst_id, close, vol_quote, impulse_pct, vol_ratio_median, vol_ratio_mean,
-                rsi, ma20, macd_hist, chg24_pct, score}] — по убыванию score
+                rsi, ma20, macd_hist, chg24_pct, score, liquidity}] — по убыванию score
+  illiquid    то же — прошли фильтр, не прошли ликвидность (причины — liquidity.reasons)
   near        то же + failed: [условие] — не хватило одного условия
-  warnings    предупреждения скана (лента отстаёт, пустой универсум)
+  warnings    предупреждения скана (лента отстаёт, пустой универсум, нет pump-pocket.json)
   note        одна строка обоснования итога
 Условия (ключи checks/failed): impulse, volume, rsi, ma20, macd.
+Поле liquidity пары (null — не проверялась): {ok, checks {depth, spread, turnover}, failed,
+reasons, notes, turnover_usdt, turnover_x, depth_usdt, depth_x, spread_pct, best_bid, best_ask,
+ask_levels, band_covered, book_ts}; *_x — в долях позиции P; null в checks и числах — не
+проверялось (повтор без стакана). band_covered=false — 400 уровней не покрыли полосу, глубина —
+оценка снизу. Поля liquidity и illiquid добавлены в PUMP-LIQ без смены v: изменение аддитивное,
+а candidates, как и прежде, — кандидаты на вход, теперь с проверенной ликвидностью. Строка scan
+без поля liquidity записана до PUMP-LIQ: ликвидность в ней не проверялась.
 
 Коды выхода: 0 — скан выполнен (с кандидатами или без); 2 — ошибка данных или сети (скан не
 состоялся, в журнал не пишется), а также ошибка записи журнала и неверные аргументы.
@@ -110,10 +156,15 @@ MAX_PAGES = 20
 EPS = 1e-9                   # допуск сравнения с порогами (ошибка округления float)
 
 TICKERS_PATH = "/api/v5/market/tickers"
+BOOKS_PATH = "/api/v5/market/books"
+BOOK_LEVELS = 400            # уровней на сторону в market/books (максимум OKX)
 ENDPOINTS = {"candles": ("/api/v5/market/candles", 300),           # путь, макс. limit
              "history": ("/api/v5/market/history-candles", 100)}
-PUBLIC_PATHS = frozenset({TICKERS_PATH} | {p for p, _ in ENDPOINTS.values()})
+PUBLIC_PATHS = frozenset({TICKERS_PATH, BOOKS_PATH} | {p for p, _ in ENDPOINTS.values()})
 USER_AGENT = "okx-pump-scanner/1.0"
+
+POCKET_PATH = Path("pump-pocket.json")   # лимиты кармана: только чтение, меняет только человек
+POCKET_FIELD = "max_position_pct"        # имя историческое: значение — лимит позиции в USDT
 
 ALWAYS_EXCLUDED = frozenset({"BTC"})     # BTC-USDT: движок P1-72H и grid (сканы №4–5)
 STABLECOINS = frozenset({
@@ -123,11 +174,18 @@ STABLECOINS = frozenset({
 })
 
 CONDITIONS = ("impulse", "volume", "rsi", "ma20", "macd")
-STATUS_ORDER = ("candidate", "near", "rejected", "stale", "insufficient")
+LIQ_CONDITIONS = ("depth", "spread", "turnover")
+LIQ_FIELDS = ("turnover_usdt", "turnover_x", "depth_usdt", "depth_x", "spread_pct", "best_bid",
+              "best_ask", "ask_levels", "band_covered", "book_ts")
+STATUS_ORDER = ("candidate", "illiquid", "near", "rejected", "stale", "insufficient")
 
 
 class ScanError(RuntimeError):
     """Скан не может быть выполнен: неверные данные биржи или запрещённый запрос."""
+
+
+class PocketError(ValueError):
+    """pump-pocket.json нет или он не читается: проверка ликвидности пропускается."""
 
 
 # Ошибки, при которых скан не состоялся (код выхода 2). HTTPError/URLError/TimeoutError — OSError.
@@ -140,6 +198,15 @@ class Thresholds:
     vol_ratio_min: float = 1.5   # объём к медиане 20 предыдущих свечей
     rsi_min: float = 50.0
     rsi_max: float = 72.0
+
+
+@dataclass(frozen=True)
+class LiquidityRules:
+    """Пороги ликвидности против позиции кармана P (обоснование — в docstring модуля, скан №4)."""
+    band_pct: float = 1.0        # полоса от лучшего ask, %: глубина, которую съест покупка
+    depth_min: float = 3.0       # глубина ask в полосе ≥ depth_min × P
+    turnover_min: float = 5.0    # оборот последней закрытой свечи ≥ turnover_min × P
+    spread_max: float = 0.5      # спред ≤ spread_max, % от mid
 
 
 @dataclass(frozen=True)
@@ -400,7 +467,7 @@ def analyze_pair(inst_id: str, candles: Sequence[Candle], th: Thresholds) -> dic
 
 def _order_key(row: dict) -> tuple:
     rank = STATUS_ORDER.index(row["status"])
-    if row["status"] in ("candidate", "near"):
+    if row["status"] in ("candidate", "illiquid", "near"):
         return rank, -row["score"], row["inst_id"]
     if row["status"] == "rejected":
         imp = row["metrics"]["impulse_pct"]
@@ -427,14 +494,158 @@ def finalize(rows: list[dict], expected_ts: Optional[int] = None) -> tuple[Optio
     return ref_ts, warnings
 
 
+# --- Ликвидность (PUMP-LIQ) ---
+
+def read_position_limit(path: Path) -> float:
+    """Лимит позиции кармана P, USDT: поле max_position_pct из pump-pocket.json. Только чтение."""
+    name = Path(path).as_posix()
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")     # BOM от PowerShell — не ошибка
+    except FileNotFoundError:
+        raise PocketError(f"{name} не найден") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PocketError(f"{name} не читается: {exc}") from None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PocketError(f"{name} не читается: не JSON ({exc.msg}, строка {exc.lineno})") from None
+    value = data.get(POCKET_FIELD) if isinstance(data, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < math.inf:
+        raise PocketError(f"{name}: {POCKET_FIELD} = {value!r} — нужно число USDT > 0")
+    return float(value)
+
+
+def _levels(raw, inst_id: str) -> list[tuple[float, float]]:
+    """Уровни стакана [px, sz, …] -> [(px, sz)]; уровни с нулевой ценой или размером — мимо."""
+    out = []
+    for lvl in raw or ():
+        try:
+            px, sz = float(lvl[0]), float(lvl[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            raise ScanError(f"{inst_id}: уровень стакана не [px, sz, …]: {str(lvl)[:80]}") from None
+        if 0 < px < math.inf and 0 < sz < math.inf:
+            out.append((px, sz))
+    return out
+
+
+def parse_book(data: Sequence, inst_id: str, levels: int = BOOK_LEVELS) -> dict:
+    """Ответ market/books -> {asks по возрастанию цены, bids по убыванию, ts, levels}.
+    Для SPOT sz — в базовой валюте, px × sz — в котируемой. Пустой ответ — пустой стакан."""
+    snap = data[0] if data else {}
+    if not isinstance(snap, dict):
+        raise ScanError(f"{inst_id}: ответ market/books — не объект: {str(snap)[:120]}")
+    ts = str(snap.get("ts") or "")
+    return {"asks": sorted(_levels(snap.get("asks"), inst_id)),
+            "bids": sorted(_levels(snap.get("bids"), inst_id), reverse=True),
+            "ts": int(ts) if ts.isdigit() else None, "levels": levels}
+
+
+def fetch_book(client, inst_id: str, levels: int = BOOK_LEVELS) -> dict:
+    """Снимок стакана: публичный GET market/books (лента — та же, что у свечей)."""
+    data = client.get(BOOKS_PATH, {"instId": inst_id, "sz": str(levels)})
+    return parse_book(data, inst_id, levels)
+
+
+def _at_least(value: float, bound: float) -> bool:
+    """value ≥ bound с допуском на округление float (относительным: суммы в USDT)."""
+    return value >= bound - EPS * max(1.0, abs(bound))
+
+
+def _usdt(x: float) -> str:
+    return f"{x:,.0f}".replace(",", " ") if abs(x) >= 100 else f"{x:.2f}"
+
+
+def check_liquidity(vol_quote: Optional[float], book: Optional[dict], position: float,
+                    rules: LiquidityRules = LiquidityRules(), quote: str = QUOTE) -> dict:
+    """Ликвидность пары против позиции кармана P (USDT). book=None — стакан не проверялся
+    (повтор --at): depth и spread = None, решение — по обороту свечи."""
+    out = dict.fromkeys(LIQ_FIELDS)
+    if quote != QUOTE:
+        return dict(ok=False, checks=dict.fromkeys(LIQ_CONDITIONS), failed=[], notes=[],
+                    reasons=[f"котировка {quote or '—'}: лимит позиции кармана — в {QUOTE}, "
+                             f"ликвидность не проверить"], **out)
+    vq = vol_quote or 0.0
+    need = {"turnover": rules.turnover_min * position, "depth": rules.depth_min * position}
+    checks: dict[str, Optional[bool]] = {"depth": None, "spread": None,
+                                          "turnover": _at_least(vq, need["turnover"])}
+    text = {"turnover": f"оборот свечи {_usdt(vq)} USDT < {rules.turnover_min:g} × "
+                        f"{position:g} = {_usdt(need['turnover'])} USDT"}
+    out.update(turnover_usdt=_sig(vq), turnover_x=_r(vq / position, 4))
+    notes = []
+    if book is None:
+        notes.append("стакан не проверен: повтор --at, исторического стакана у OKX нет")
+    else:
+        asks, bids = book["asks"], book["bids"]
+        ask = asks[0][0] if asks else None
+        bid = bids[0][0] if bids else None
+        band = [(px, sz) for px, sz in asks if (px - ask) / ask * 100 <= rules.band_pct + EPS]
+        depth = math.fsum(px * sz for px, sz in band)
+        covered = len(band) < len(asks) or len(asks) < book["levels"]
+        spread = (ask - bid) / ((ask + bid) / 2) * 100 if asks and bids else None
+        checks["depth"] = _at_least(depth, need["depth"])
+        checks["spread"] = spread is not None and -EPS <= spread <= rules.spread_max + EPS
+        text["depth"] = ("стакан пуст: нет асков" if not asks else
+                         f"глубина ask до +{rules.band_pct:g}%: {_usdt(depth)} USDT < "
+                         f"{rules.depth_min:g} × {position:g} = {_usdt(need['depth'])} USDT"
+                         + ("" if covered else
+                            f" (оценка снизу: {len(asks)} уровней не покрыли полосу)"))
+        if spread is None:
+            text["spread"] = "спред: нет " + ("бидов" if asks else "асков" if bids else "заявок")
+        elif spread < -EPS:
+            text["spread"] = f"стакан пересечён: bid {bid:g} > ask {ask:g}"
+        else:
+            text["spread"] = f"спред {spread:.2f}% > {rules.spread_max:g}%"
+        out.update(depth_usdt=_sig(depth), depth_x=_r(depth / position, 4),
+                   spread_pct=_r(spread, 4), best_bid=bid, best_ask=ask, ask_levels=len(band),
+                   band_covered=covered, book_ts=iso_local(book["ts"]))
+    failed = [k for k in LIQ_CONDITIONS if checks[k] is False]
+    return dict(ok=not failed, checks=checks, failed=failed,
+                reasons=[text[k] for k in failed], notes=notes, **out)
+
+
+def apply_liquidity(client, rows: list[dict], pocket: Optional[Path],
+                    rules: LiquidityRules = LiquidityRules(),
+                    replay: bool = False) -> tuple[dict, list[str]]:
+    """Проверка ликвидности кандидатов и почти кандидатов (строки после finalize). Кандидат,
+    не прошедший её, -> illiquid. pocket=None — проверка выключена (--no-liquidity).
+    Возвращает (блок liquidity отчёта, предупреждения)."""
+    info = {"enabled": False, "pocket": None if pocket is None else Path(pocket).as_posix(),
+            "position_usdt": None, **asdict(rules), "book": False, "book_levels": BOOK_LEVELS,
+            "note": None}
+    if pocket is None:
+        info["note"] = "выключена флагом --no-liquidity"
+        return info, []
+    try:
+        position = read_position_limit(pocket)
+    except PocketError as exc:
+        info["note"] = str(exc)
+        return info, [f"ликвидность не проверена: {exc} — кандидаты не проверены по стакану "
+                      f"и обороту"]
+    info.update(enabled=True, position_usdt=position, book=not replay)
+    if replay:
+        info["note"] = "повтор --at: исторического стакана у OKX нет — проверен только оборот свечи"
+    for r in rows:
+        if r["status"] not in ("candidate", "near"):
+            continue
+        quote = r["inst_id"].partition("-")[2]
+        book = None if replay or quote != QUOTE else fetch_book(client, r["inst_id"])
+        liq = check_liquidity(r["metrics"]["vol_quote"], book, position, rules, quote)
+        r["liquidity"] = liq
+        if r["status"] == "candidate" and not liq["ok"]:
+            r["status"], r["reasons"] = "illiquid", list(liq["reasons"])
+    return info, []
+
+
 # --- Скан ---
 
 def run_scan(client, *, pairs: Optional[Sequence[str]] = None, top_n: int = DEFAULT_TOP_N,
              exclude: Iterable[str] = (), at_ms: Optional[int] = None,
              n_bars: int = DEFAULT_BARS, thresholds: Thresholds = Thresholds(),
              feed: str = "demo", endpoint: Optional[str] = None,
-             now_ms: Optional[int] = None) -> dict:
-    """Полный скан (только публичные GET через client.get). Ошибки данных не глушатся."""
+             now_ms: Optional[int] = None, pocket: Optional[Path] = None,
+             liq_rules: LiquidityRules = LiquidityRules()) -> dict:
+    """Полный скан (только публичные GET через client.get). Ошибки данных не глушатся.
+    pocket — путь pump-pocket.json для проверки ликвидности; None — без проверки."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     endpoint = endpoint or ("history" if at_ms is not None else "candles")
     if pairs:
@@ -451,6 +662,10 @@ def run_scan(client, *, pairs: Optional[Sequence[str]] = None, top_n: int = DEFA
     ref_ms = at_ms if at_ms is not None else now_ms
     expected_ts = ref_ms // BAR_MS * BAR_MS - BAR_MS
     candle_ts, warnings = finalize(rows, expected_ts)
+    liquidity, liq_warnings = apply_liquidity(client, rows, pocket, liq_rules,
+                                              replay=at_ms is not None)
+    warnings += liq_warnings
+    rows.sort(key=_order_key)                       # illiquid — сразу за кандидатами
     by_status = {s: [r["inst_id"] for r in rows if r["status"] == s] for s in STATUS_ORDER}
     report = {
         "scanner": SOURCE,
@@ -464,12 +679,14 @@ def run_scan(client, *, pairs: Optional[Sequence[str]] = None, top_n: int = DEFA
         "bars": n_bars,
         "candle_ts": iso_utc(candle_ts),
         "thresholds": asdict(thresholds),
+        "liquidity": liquidity,
         "universe": universe,
         "pairs": scan_pairs,
         "counts": {"scanned": len(rows), "candidates": len(by_status["candidate"]),
                    "near": len(by_status["near"]), "insufficient": len(by_status["insufficient"]),
                    "stale": len(by_status["stale"])},
         "candidates": by_status["candidate"],
+        "illiquid": by_status["illiquid"],
         "near": by_status["near"],
         "insufficient": by_status["insufficient"],
         "stale": by_status["stale"],
@@ -510,6 +727,7 @@ def public_row(row: dict) -> dict:
         "checks": row["checks"],
         "failed": row["failed"],
         "reasons": row["reasons"],
+        "liquidity": row.get("liquidity"),
     }
 
 
@@ -524,20 +742,26 @@ def scan_note(report: dict) -> str:
             f"объём {r['vol_ratio_median']:.1f}×, RSI {r['rsi']:.1f})" for r in top)
     else:
         text = f"Кандидатов 0 из {n}"
-        if report["near"]:
-            text += "; почти: " + ", ".join(
-                f"{i} — {res[i]['reasons'][0]}" for i in report["near"][:3])
+    if report["illiquid"]:
+        text += "; неликвидны: " + ", ".join(
+            f"{i} — {res[i]['reasons'][0]}" for i in report["illiquid"][:3])
+    if not report["candidates"] and report["near"]:
+        text += "; почти: " + ", ".join(
+            f"{i} — {res[i]['reasons'][0]}" for i in report["near"][:3])
     if report["insufficient"]:
         text += f"; данных мало: {', '.join(report['insufficient'])}"
     if report["stale"]:
         text += f"; свеча устарела: {', '.join(report['stale'])}"
+    if report["candidates"] and not report["liquidity"]["enabled"]:
+        text += "; ликвидность не проверена"
     return text
 
 
 # --- Журнал ---
 
 JOURNAL_ROW_KEYS = ("inst_id", "close", "vol_quote", "impulse_pct", "vol_ratio_median",
-                    "vol_ratio_mean", "rsi", "ma20", "macd_hist", "chg24_pct", "score")
+                    "vol_ratio_mean", "rsi", "ma20", "macd_hist", "chg24_pct", "score",
+                    "liquidity")
 
 
 def journal_record(report: dict) -> dict:
@@ -557,10 +781,12 @@ def journal_record(report: dict) -> dict:
         "candle_ts": report["candle_ts"],
         "bars": report["bars"],
         "thresholds": report["thresholds"],
+        "liquidity": report["liquidity"],
         "universe": report["universe"],
         "pairs": report["pairs"],
         "counts": report["counts"],
         "candidates": [brief(i) for i in report["candidates"]],
+        "illiquid": [brief(i) for i in report["illiquid"]],
         "near": [dict(brief(i), failed=res[i]["failed"]) for i in report["near"]],
         "warnings": report["warnings"],
         "note": report["note"],
@@ -591,6 +817,40 @@ def _yes(flag: Optional[bool]) -> str:
     return "—" if flag is None else ("да" if flag else "нет")
 
 
+def _times(x: Optional[float]) -> str:
+    return "—" if x is None else (f"{x:.0f}" if abs(x) >= 100 else f"{x:.2f}")
+
+
+def _liq_header(liq: dict) -> str:
+    if not liq["enabled"]:
+        return f"Ликвидность: не проверяется — {liq['note']}"
+    parts = [f"позиция P = {liq['position_usdt']:g} USDT ({POCKET_FIELD} из {liq['pocket']})"]
+    if liq["book"]:
+        parts += [f"глубина ask до +{liq['band_pct']:g}% ≥ {liq['depth_min']:g}×P",
+                  f"спред ≤ {liq['spread_max']:g}%"]
+    parts.append(f"оборот свечи ≥ {liq['turnover_min']:g}×P")
+    return "Ликвидность: " + " · ".join(parts) + (f" ({liq['note']})" if liq["note"] else "")
+
+
+def _liq_table(report: dict) -> list[str]:
+    """Таблица ликвидности проверенных пар (кандидаты, illiquid, почти кандидаты)."""
+    checked = [r for r in report["results"] if r.get("liquidity")]
+    if not checked:
+        return []
+    lines = ["", f"Ликвидность против позиции P = {report['liquidity']['position_usdt']:g} USDT:",
+             f"{'Пара':<14}{'Глуб.ask':>9}{'×P':>7}{'Спред%':>8}{'Оборот':>8}{'×P':>7}  Итог"]
+    for r in checked:
+        q = r["liquidity"]
+        if not q["ok"]:
+            verdict = "нет: " + "; ".join(q["reasons"])
+        else:
+            verdict = "да" + (" (по обороту: стакан не проверен)" if q["notes"] else "")
+        lines.append(f"{r['inst_id']:<14}{_compact(q['depth_usdt']):>9}{_times(q['depth_x']):>7}"
+                     f"{_fmt(q['spread_pct'], '.2f'):>8}{_compact(q['turnover_usdt']):>8}"
+                     f"{_times(q['turnover_x']):>7}  {verdict}")
+    return lines
+
+
 def render_text(report: dict) -> str:
     th = report["thresholds"]
     u = report["universe"]
@@ -617,6 +877,7 @@ def render_text(report: dict) -> str:
         f"Фильтр: импульс ≥ {th['impulse_min']:g}% · объём ≥ {th['vol_ratio_min']:g}× медианы "
         f"20 свечей · RSI(14) {th['rsi_min']:g}–{th['rsi_max']:g} · close > MA20 · "
         f"MACD-гист.(12/26/9) > 0",
+        _liq_header(report["liquidity"]),
         "",
         f"{'Пара':<14}{'Имп.%':>7}{'vol×мед':>9}{'vol×ср':>8}{'RSI':>6}{'>MA20':>6}"
         f"{'MACD>0':>7}{'24ч%':>8}{'Оборот':>8}{'score':>7}  Итог",
@@ -625,8 +886,12 @@ def render_text(report: dict) -> str:
         c = r["checks"]
         if r["status"] == "candidate":
             verdict = "КАНДИДАТ"
+        elif r["status"] == "illiquid":
+            verdict = "НЕЛИКВИДЕН: " + "; ".join(r["reasons"])
         elif r["status"] == "near":
             verdict = "почти: " + r["reasons"][0]
+            if r.get("liquidity") and not r["liquidity"]["ok"]:
+                verdict += " · неликвиден"
         elif r["status"] == "rejected":
             verdict = "нет: " + "; ".join(r["reasons"])
         else:
@@ -637,14 +902,19 @@ def render_text(report: dict) -> str:
             f"{_fmt(r['rsi'], '.1f'):>6}{_yes(c.get('ma20')):>6}{_yes(c.get('macd')):>7}"
             f"{_fmt(r['chg24_pct'], '+.2f'):>8}{_compact(r['vol_quote']):>8}"
             f"{_fmt(r['score'], '.2f'):>7}  {verdict}")
+    lines += _liq_table(report)
     counts = report["counts"]
+    liq = report["liquidity"]
     lines += [
         "",
         f"Кандидатов: {counts['candidates']} из {counts['scanned']}"
         + (" — " + ", ".join(report["candidates"]) if report["candidates"] else "."),
-        "Почти кандидаты (не хватило одного условия): "
-        + (", ".join(report["near"]) if report["near"] else "нет"),
     ]
+    if liq["enabled"]:
+        lines.append("Неликвидны (фильтр пройден, ликвидность — нет): "
+                     + (", ".join(report["illiquid"]) if report["illiquid"] else "нет"))
+    lines.append("Почти кандидаты (не хватило одного условия): "
+                 + (", ".join(report["near"]) if report["near"] else "нет"))
     if report["insufficient"]:
         lines.append(f"Данных мало (< {MIN_BARS} закрытых свечей): {', '.join(report['insufficient'])}")
     if report["stale"]:
@@ -657,8 +927,16 @@ def render_text(report: dict) -> str:
     else:
         lines.append("Журнал: " + (f"+1 строка scan → {journal}" if journal else
                                    "не пишется (повтор или --no-journal)"))
-    lines.append("Кандидат — не сделка: вход, размер, стоп и ликвидность решает Pump Risk Taker "
-                 "по pump-pocket.json.")
+    if not liq["enabled"]:
+        lines.append("Кандидат — не сделка: вход, размер, стоп и ликвидность (сканер её не "
+                     "проверял) решает Pump Risk Taker по pump-pocket.json.")
+    else:
+        lines.append("Кандидат — не сделка: вход, размер и стоп решает Pump Risk Taker по "
+                     "pump-pocket.json; " + (
+                         "ликвидность (стакан, спред, оборот) проверена на момент скана."
+                         if liq["book"] else
+                         "ликвидность проверена только по обороту свечи (стакана на прошлый "
+                         "момент нет)."))
     return "\n".join(lines)
 
 
@@ -675,10 +953,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m src.pump_scanner",
         description="Детерминированный памп-сканер (PUMP-CODIFY): публичные данные OKX, "
-                    "закрытые 1H-свечи, фильтр скана №5. Ордеров не ставит.",
+                    "закрытые 1H-свечи, фильтр скана №5, ликвидность кандидата против лимита "
+                    "позиции pump-pocket.json (PUMP-LIQ). Ордеров не ставит.",
         epilog="Примеры:\n"
                "  python -m src.pump_scanner --exclude ETH SOL SUI ADA TRX ETC APT BNB XLM DOT\n"
                "  python -m src.pump_scanner --at 2026-09-24T09:47+05:00 --pairs OKB-USDT LTC-USDT\n"
+               "  python -m src.pump_scanner --at 2026-09-24T08:42+05:00 --pairs IMX-USDT COMP-USDT\n"
                "Коды выхода: 0 — скан выполнен; 2 — ошибка данных или сети.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--feed", choices=("demo", "live"), default="demo",
@@ -705,6 +985,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="нижняя граница RSI(14) (по умолчанию 50)")
     p.add_argument("--rsi-max", type=float, default=Thresholds.rsi_max,
                    help="верхняя граница RSI(14) (по умолчанию 72)")
+    liq = LiquidityRules
+    p.add_argument("--liq-band", type=_positive, default=liq.band_pct, metavar="PCT",
+                   help=f"ликвидность: полоса от лучшего ask для глубины стакана, %% "
+                        f"(по умолчанию {liq.band_pct:g})")
+    p.add_argument("--depth-min", type=_positive, default=liq.depth_min, metavar="K",
+                   help=f"ликвидность: глубина ask в полосе ≥ K × позиция кармана "
+                        f"(по умолчанию {liq.depth_min:g})")
+    p.add_argument("--turnover-min", type=_positive, default=liq.turnover_min, metavar="M",
+                   help=f"ликвидность: оборот последней закрытой свечи ≥ M × позиция "
+                        f"(по умолчанию {liq.turnover_min:g})")
+    p.add_argument("--spread-max", type=_positive, default=liq.spread_max, metavar="PCT",
+                   help=f"ликвидность: спред ≤ PCT %% от mid (по умолчанию {liq.spread_max:g})")
+    p.add_argument("--no-liquidity", action="store_true",
+                   help=f"не проверять ликвидность (повтор прошлых сканов как они были); "
+                        f"позиция — {POCKET_FIELD} из {POCKET_PATH.as_posix()}")
     p.add_argument("--endpoint", choices=tuple(ENDPOINTS), default=None,
                    help="эндпоинт свечей: по умолчанию candles для живого скана и history для "
                         "--at; для диагностики расхождений повтора")
@@ -736,11 +1031,14 @@ def main(argv: Optional[list[str]] = None, client=None,
     if not 0 <= args.rsi_min <= args.rsi_max <= 100:
         parser.error("RSI: нужно 0 <= --rsi-min <= --rsi-max <= 100")
     thresholds = Thresholds(args.impulse_min, args.vol_min, args.rsi_min, args.rsi_max)
+    liq_rules = LiquidityRules(args.liq_band, args.depth_min, args.turnover_min, args.spread_max)
     client = client if client is not None else make_client(args.feed)
     try:
         report = run_scan(client, pairs=pairs, top_n=args.top, exclude=args.exclude,
                           at_ms=args.at, n_bars=args.bars, thresholds=thresholds,
-                          feed=args.feed, endpoint=args.endpoint, now_ms=now_ms)
+                          feed=args.feed, endpoint=args.endpoint, now_ms=now_ms,
+                          pocket=None if args.no_liquidity else POCKET_PATH,
+                          liq_rules=liq_rules)
     except SCAN_ERRORS as exc:
         print(f"Скан не выполнен (ошибка данных или сети): {type(exc).__name__}: "
               f"{str(exc)[:300]}", file=sys.stderr)
