@@ -7,8 +7,8 @@ demo — data/risk_state.db и data/bot_state.db, live — data/live/.
     python -m src.ops status                     # риск-снапшот + метрики движка + открытые ордера
     python -m src.ops status --mode live         # то же для live-кармана
     python -m src.ops kill "причина"             # отменить ВСЕ ордера (включая algo), остановить
-                                                 # grid-ботов OKX, заблокировать входы
-    python -m src.ops kill --keep-bots           # то же, но нативные grid-боты не трогать
+                                                 # grid- и DCA-ботов OKX, заблокировать входы
+    python -m src.ops kill --keep-bots           # то же, но нативных grid- и DCA-ботов не трогать
     python -m src.ops kill --mode live "причина" # аварийная остановка live-кармана
     python -m src.ops reset kill|global|daily    # ручной сброс (только человек)
 
@@ -86,7 +86,7 @@ def main(argv=None) -> int:
     sub.add_parser("status", parents=[mode_opt], help="состояние риска и движка").set_defaults(func=cmd_status)
     kill = sub.add_parser("kill", parents=[mode_opt], help="аварийная остановка")
     kill.add_argument("reason", nargs="?", default="manual")
-    kill.add_argument("--keep-bots", action="store_true", help="не останавливать нативные grid-боты OKX")
+    kill.add_argument("--keep-bots", action="store_true", help="не останавливать нативные grid- и DCA-боты OKX")
     kill.set_defaults(func=cmd_kill)
     reset = sub.add_parser("reset", parents=[mode_opt], help="ручной сброс kill-switch / breaker")
     reset.add_argument("scope", choices=("kill", "global", "daily"))

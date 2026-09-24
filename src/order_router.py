@@ -25,7 +25,7 @@ Kill-switch: при инициализации роутер ПОДПИСЫВАЕ
 подписчиков, поэтому при одновременной работе engine и OrderRouter
 регистрации не перезаписывают друг друга (задача KILL-CALLBACK-OWNER).
 Единая точка отмены — connector.emergency_stop (bulk-отмена обычных и
-algo-ордеров + остановка grid-ботов); после отмены локальные открытые
+algo-ордеров + остановка grid- и DCA-ботов); после отмены локальные открытые
 ордера в storage помечаются canceled.
 
 Известное ограничение: engine.py регистрирует в risk свой колбэк напрямую
@@ -283,7 +283,7 @@ class OrderRouter:
     def _cancel_all_orders(self, flatten: bool = False) -> dict:
         """Подписчик реестра kill-switch connector (вызывается диспетчером
         kill_switch_dispatch). Единая точка отмены — connector.emergency_stop:
-        bulk-отмена обычных и algo-ордеров + остановка grid-ботов; после неё
+        bulk-отмена обычных и algo-ордеров + остановка grid- и DCA-ботов; после неё
         локальные открытые ордера в storage помечаются canceled.
 
         Контракт risk.set_order_canceller: вернуть {cancelled: [...], failed: [...]}.
