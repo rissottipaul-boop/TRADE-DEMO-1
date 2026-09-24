@@ -9,6 +9,12 @@
 - системная пауза после 5 убытков подряд (24ч), лимит 10 входов/день;
 - kill-switch (терминальный, сброс только вручную).
 
+Equity и HWM ведёт только update_equity — баланс биржи по рынку, где PnL
+открытых позиций уже учтён. record_pnl учитывает закрытую сделку в дневном PnL
+и сериях убытков, но equity не меняет: иначе PnL считался бы дважды
+(RISK-PNL-DOUBLE). Без свежего equity (EQUITY_MAX_AGE_S) вход запрещён:
+breaker'ы по просадке без фида equity слепы.
+
 Состояние — собственный SQLite-файл data/risk_state.db (переживает рестарт,
 breaker не снимается перезапуском). Только stdlib. Сетевых вызовов нет:
 kill_switch дёргает коннектор через колбэк set_order_canceller().
@@ -38,6 +44,12 @@ INST_LOSS_STREAK_BLOCK = 3    # серия убытков по инструме�
 INST_BLOCK_HOURS = 24         # cooldown блокировки инструмента
 SYS_LOSS_STREAK_PAUSE = 5     # серия убытков по системе -> пауза 24ч
 SYS_PAUSE_HOURS = 24
+
+# Свежесть equity (RISK-PNL-DOUBLE): вход запрещён, если update_equity не было
+# дольше этого срока или не было вообще. 600 с — двойной запас к интервалу
+# движка (engine._equity_interval = 300 с). Увеличение ослабляет защиту —
+# только решение человека (AGENTS.md §2).
+EQUITY_MAX_AGE_S = 600
 
 _DB_PATH = Path("data/risk_state.db")
 
@@ -142,16 +154,25 @@ class _RiskCore:
     # --- Публичное API (вызывается модульными обёртками) ---
 
     def update_equity(self, equity: float) -> list[str]:
-        """Equity с биржи (totalEq) + проверка лимитов по нему.
+        """Equity с биржи (totalEq или стоимость кармана) + проверка лимитов по нему.
 
-        Без этой проверки breakers видели бы только реализованный PnL из
-        record_pnl, а нереализованный убыток (открытые позиции, grid-боты)
-        не останавливал бы входы.
+        Единственный источник equity и HWM (RISK-PNL-DOUBLE): баланс по рынку уже
+        содержит PnL открытых позиций, поэтому record_pnl equity не трогает.
+        Нереализованный убыток (открытые позиции, grid-боты) останавливает входы
+        через дневной лимит и глобальный breaker здесь же.
+
+        Момент вызова пишется в risk_kv (equity_updated_at) и переживает рестарт:
+        по нему check_entry_allowed запрещает вход при устаревшем equity.
+        Нечисловое значение (NaN, inf) не принимается и свежесть не продлевает.
         """
         events: list[str] = []
         with self._lock:
+            if not math.isfinite(equity):
+                self._log_event("equity_invalid", detail=f"equity={equity!r} отброшено")
+                return events
             self._maybe_rollover_day()
             self._set("equity", equity)
+            self._set("equity_updated_at", _utc_now())
             hwm = self._get("hwm")
             if equity > hwm:
                 hwm = equity
@@ -174,6 +195,24 @@ class _RiskCore:
                 events.append("global_breaker")
         return events
 
+    def _equity_stale_reason(self) -> Optional[str]:
+        """Причина запрета входа по свежести equity или None (RISK-PNL-DOUBLE).
+
+        Equity меняет только update_equity, поэтому без свежего вызова глобальный
+        breaker и дневной лимит по equity не увидят просадку. Отметка «из будущего»
+        дальше EQUITY_MAX_AGE_S (часы переведены назад) тоже считается устаревшей.
+        """
+        updated_at = self._get("equity_updated_at")
+        if updated_at <= 0:
+            return ("equity ни разу не выставлялась: нет фида equity (update_equity по "
+                    "балансу биржи) — без него breaker'ы по просадке не работают")
+        age = _utc_now() - updated_at
+        if age > EQUITY_MAX_AGE_S or age < -EQUITY_MAX_AGE_S:
+            return (f"equity устарела: последний update_equity {age:.0f} с назад, допустимо "
+                    f"до {EQUITY_MAX_AGE_S} с — проверьте фид equity (движок или бот, "
+                    f"update_equity по балансу биржи)")
+        return None
+
     def check_entry_allowed(self, inst_id: str, side: str) -> tuple[bool, str]:
         with self._lock:
             self._maybe_rollover_day()
@@ -183,6 +222,9 @@ class _RiskCore:
                 return False, "глобальный breaker: drawdown >= 15% от HWM, нужен ручной сброс"
             if self._get("daily_breaker"):
                 return False, "дневной лимит убытка -6% исчерпан (сброс 00:00 UTC)"
+            stale = self._equity_stale_reason()
+            if stale:
+                return False, stale
             pause_until = self._get("system_pause_until")
             if pause_until and _utc_now() < pause_until:
                 return False, f"системная пауза после {SYS_LOSS_STREAK_PAUSE} убытков подряд (24ч)"
@@ -278,8 +320,8 @@ class _RiskCore:
         - day_pnl, equity, hwm — реализованного PnL у покупки нет;
         - entries_today — счётчик входов уже инкрементировал register_entry
           (вызывается роутером на каждый ордер, включая покупки DCA).
-        Реализованный PnL спотовой позиции фиксируется record_pnl при продаже,
-        нереализованный — через update_equity по балансу.
+        Реализованный PnL спотовой позиции фиксируется record_pnl при продаже
+        (day_pnl и серии), equity — только update_equity по балансу.
         """
         with self._lock:
             self._maybe_rollover_day()
@@ -290,15 +332,20 @@ class _RiskCore:
                                    f"(удалено записей: {cur.rowcount})")
 
     def record_pnl(self, inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
+        """Результат закрытой сделки: дневной PnL, серии убытков, блокировки, пауза.
+
+        Equity и HWM не меняет (RISK-PNL-DOUBLE): их ведёт update_equity по балансу
+        биржи, где PnL сделки уже учтён — до закрытия как нереализованный, после
+        как реализованный. Прибавка здесь учла бы его дважды: прибыль завышала бы
+        HWM, убыток вычитался бы повторно, и глобальный breaker срабатывал бы
+        раньше номинала. Дневной лимит здесь считается по day_pnl, глобальный
+        breaker — по текущей equity из update_equity.
+        """
         events: list[str] = []
         with self._lock:
             self._maybe_rollover_day()
-            equity = self._get("equity") + pnl
-            self._set("equity", equity)
+            equity = self._get("equity")
             hwm = self._get("hwm")
-            if equity > hwm:
-                hwm = equity
-                self._set("hwm", hwm)
 
             # Атрибуция PnL к дню закрытия (UTC)
             if _utc_day(closed_at.timestamp()) == _utc_day(_utc_now()):
@@ -331,7 +378,7 @@ class _RiskCore:
                     f"дневной убыток {day_pnl:.2f} ({day_pnl / day_start * 100:.1f}%)", scope="daily")
                 events.append("daily_limit")
 
-            # Глобальный breaker -15% от HWM
+            # Глобальный breaker -15% от HWM — по текущей equity из update_equity
             if hwm > 0 and equity <= hwm * (1 - GLOBAL_DD_LIMIT_PCT / 100.0) \
                     and not self._get("global_breaker"):
                 self.trip_breaker(
@@ -443,6 +490,7 @@ class _RiskCore:
             self._maybe_rollover_day()
             equity = self._get("equity")
             hwm = self._get("hwm")
+            updated_at = self._get("equity_updated_at")
             with self._conn() as conn:
                 open_risk = [dict(r) for r in conn.execute(
                     "SELECT inst_id, side, risk_pct FROM risk_open_risk").fetchall()]
@@ -450,6 +498,9 @@ class _RiskCore:
                     "SELECT inst_id, loss_streak, blocked_until FROM risk_instruments").fetchall()]
             return {
                 "equity": equity,
+                # Свежесть фида equity: вход запрещён при возрасте > EQUITY_MAX_AGE_S
+                "equity_updated_at": updated_at or None,
+                "equity_age_s": _utc_now() - updated_at if updated_at else None,
                 "hwm": hwm,
                 "drawdown_pct": (equity / hwm - 1) * 100.0 if hwm > 0 else 0.0,
                 "day_pnl": self._get("day_pnl"),
@@ -486,7 +537,10 @@ def _c() -> _RiskCore:
 # --- Модульная API-поверхность (контракт insights/risk-core.md §6) ---
 
 def check_entry_allowed(inst_id: str, side: str) -> tuple[bool, str]:
-    """Единая точка допуска перед каждым ордером (включая DCA/grid)."""
+    """Единая точка допуска перед каждым ордером (включая DCA/grid).
+
+    Требует свежего equity: сначала update_equity по балансу, потом вход
+    (EQUITY_MAX_AGE_S, RISK-PNL-DOUBLE)."""
     allowed, reason = _c().check_entry_allowed(inst_id, side)
     if not allowed:
         _c()._log_event("entry_denied", inst_id=inst_id, detail=f"side={side}: {reason}")
@@ -505,6 +559,7 @@ def validate_stop_vs_liquidation(entry: float, stop: float, liq_price: float,
 
 
 def record_pnl(inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
+    """Закрытая сделка: day_pnl, серии убытков, блокировки. Equity и HWM не меняет."""
     return _c().record_pnl(inst_id, pnl, closed_at)
 
 
@@ -533,7 +588,8 @@ def set_order_canceller(callback: Callable[[bool], dict]) -> None:
 
 
 def update_equity(equity: float) -> list[str]:
-    """Обновление текущего equity (движок, по балансу) — может сработать breaker."""
+    """Equity по балансу биржи — единственный источник equity и HWM; продлевает
+    свежесть equity для check_entry_allowed. Может сработать breaker."""
     return _c().update_equity(equity)
 
 

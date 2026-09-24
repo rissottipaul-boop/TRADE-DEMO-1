@@ -5,10 +5,13 @@
 Сценарии:
 1. Вход разрешён в норме.
 2. size_position: BTC, equity 10000, риск 1%, вход 84000, стоп 82000.
-3. record_pnl с убытком -6% -> дневной breaker блокирует check_entry_allowed.
+3. record_pnl с убытком -6% -> дневной breaker блокирует check_entry_allowed;
+   equity record_pnl не меняет — её приносит update_equity по балансу (RISK-PNL-DOUBLE).
 4. trip_breaker(global) блокирует всё до reset_breaker('global').
 5. Три убытка подряд по инструменту -> block_instrument (cooldown 24ч).
 6. Состояние переживает рестарт (re-init на том же файле БД).
+7. Equity не выставлялась или старше EQUITY_MAX_AGE_S -> вход запрещён; свежий
+   update_equity снимает запрет.
 """
 import logging
 import sys
@@ -20,6 +23,7 @@ from src import risk
 logging.basicConfig(level=logging.CRITICAL)  # события риска не засоряют вывод
 
 TEST_DB = Path("data/risk_selftest.db")
+TEST_FEED_DB = Path("data/risk_selftest_feed.db")  # сценарий 7, удаляется после прогона
 _passed = 0
 
 
@@ -33,8 +37,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def main() -> None:
-    if TEST_DB.exists():
-        TEST_DB.unlink()
+    for path in (TEST_DB, TEST_FEED_DB):
+        path.unlink(missing_ok=True)
     risk.init(TEST_DB)
     risk.update_equity(10000.0)
 
@@ -92,9 +96,15 @@ def main() -> None:
     allowed, reason = risk.check_entry_allowed("BTC-USDT-SWAP", "buy")
     check("3b. вход заблокирован дневным breaker", not allowed and "дневной" in reason,
           reason)
+    before = risk.status()
+    # Баланс биржи после убытков -630: equity приходит только из update_equity
+    risk.update_equity(9370.0)
     st = risk.status()
-    check("3c. status: daily_breaker=True, equity=9370",
+    check("3c. status: daily_breaker=True, equity=9370 (из update_equity)",
           st["daily_breaker"] and abs(st["equity"] - 9370.0) < 1e-9, str(st["equity"]))
+    check("3d. record_pnl не вычел убытки из equity повторно (до баланса 10000, HWM 10000)",
+          before["equity"] == 10000.0 and before["hwm"] == 10000.0
+          and abs(before["day_pnl"] + 630.0) < 1e-9, str(before))
 
     # --- 4. Глобальный breaker: блокирует всё до ручного сброса ---
     risk.reset_breaker("daily", by="selftest")  # снимаем дневной, чтобы изолировать
@@ -111,14 +121,40 @@ def main() -> None:
 
     # --- 6. Состояние переживает рестарт ---
     risk.trip_breaker("selftest: персистентность", scope="global")
+    updated_at = risk.status()["equity_updated_at"]
     risk.init(TEST_DB)  # имитация рестарта процесса
     allowed, _ = risk.check_entry_allowed("BTC-USDT-SWAP", "buy")
     check("6a. global breaker переживает рестарт", not allowed)
     check("6b. блокировка инструмента переживает рестарт",
           risk.is_instrument_blocked("SOL-USDT-SWAP"))
     st = risk.status()
-    check("6c. equity переживает рестарт (9370)",
+    check("6c. equity из update_equity переживает рестарт (9370)",
           abs(st["equity"] - 9370.0) < 1e-9, str(st["equity"]))
+    check("6d. момент последнего update_equity переживает рестарт",
+          updated_at is not None and st["equity_updated_at"] == updated_at,
+          f"{updated_at} -> {st['equity_updated_at']}")
+
+    # --- 7. Без свежего equity вход запрещён (RISK-PNL-DOUBLE) ---
+    # Отдельная БД: сценарии 1–6 оставили breaker'ы и блокировки
+    risk.init(TEST_FEED_DB)
+    allowed, reason = risk.check_entry_allowed("BTC-USDT-SWAP", "buy")
+    check("7a. equity ни разу не выставлялась -> вход запрещён",
+          not allowed and "ни разу" in reason, reason)
+    risk.update_equity(10000.0)
+    feed_at = risk.status()["equity_updated_at"]
+    real_clock = risk._utc_now
+    risk._utc_now = lambda: feed_at + risk.EQUITY_MAX_AGE_S + 1  # фид молчит > 10 мин
+    try:
+        allowed, reason = risk.check_entry_allowed("BTC-USDT-SWAP", "buy")
+    finally:
+        risk._utc_now = real_clock
+    check("7b. equity старше EQUITY_MAX_AGE_S -> вход запрещён",
+          not allowed and "equity устарела" in reason, reason)
+    risk.update_equity(10000.0)
+    allowed, reason = risk.check_entry_allowed("BTC-USDT-SWAP", "buy")
+    check("7c. свежий update_equity снимает запрет", allowed, reason)
+    risk.init(TEST_DB)  # отпустить временную БД сценария 7
+    TEST_FEED_DB.unlink(missing_ok=True)
 
     print(f"\nSELF-TEST PASSED: {_passed} проверок")
 

@@ -6,8 +6,12 @@
 - хранилище — одно соединение sqlite ':memory:' на прогон (без файла и fsync на
   каждый _set: иначе прогон 40k баров шёл бы минуты); подкласс переопределяет лишь _conn;
 - часы — модельные: на время прогона risk._utc_now подменяется временем текущего
-  бара (дневной rollover 00:00 UTC, cooldown 24ч, системная пауза — в модельном
-  времени). Подмена под блокировкой и снимается в finally.
+  бара (дневной rollover 00:00 UTC, cooldown 24ч, системная пауза, свежесть
+  equity — в модельном времени). Подмена под блокировкой и снимается в finally.
+
+Equity и HWM ядра ведёт только update_equity по close каждого бара, как движок
+в бою (RISK-PNL-DOUBLE): record_pnl их не меняет, а вход без свежего equity
+check_entry_allowed запрещает.
 
 Бэктест — только офлайн-процесс: в процессе движка/live-раннера не запускать
 (подмена часов глобальна для модуля src.risk на время прогона).
@@ -59,7 +63,6 @@ class SimRisk:
         self.core = _MemoryRiskCore()
         self.now = 0.0                       # модельное время, секунды UTC
         self.events: list[tuple[float, str]] = []
-        self._last_equity: float | None = None
 
     @contextmanager
     def activate(self) -> Iterator["SimRisk"]:
@@ -111,21 +114,20 @@ class SimRisk:
     # --- Выход и equity ---
 
     def record_pnl(self, pnl: float) -> list[str]:
+        """Закрытие сделки: day_pnl и серии убытков. Equity ядра не меняется —
+        её обновит update_equity на close бара (RISK-PNL-DOUBLE)."""
         events = self.core.record_pnl(self.inst_id, pnl,
                                       datetime.fromtimestamp(self.now, tz=timezone.utc))
         self.events.extend((self.now, e) for e in events)
-        self._last_equity = None  # record_pnl сдвинул equity ядра: следующий update обязателен
         return events
 
     def update_equity(self, equity: float) -> list[str]:
         """Как движок в бою (engine.py -> risk.update_equity(totalEq)).
 
-        Без изменения equity вызов пропускается: HWM/лимиты зависят только от
-        значения, а дневной rollover делают и check_entry/record_pnl.
+        Вызывается на каждом баре, в том числе с тем же значением: вызов продлевает
+        свежесть equity (risk.EQUITY_MAX_AGE_S), без него check_entry_allowed
+        отказал бы во входе после нескольких баров без движения equity.
         """
-        if equity == self._last_equity:
-            return []
-        self._last_equity = equity
         events = self.core.update_equity(equity)
         self.events.extend((self.now, e) for e in events)
         return events
