@@ -131,6 +131,15 @@ class DeniedTest(unittest.TestCase):
         self.assertIsNone(edit("Edit", file_path=str(ROOT / "src" / "risk.py"), old_string="x",
                                new_string="EQUITY_MAX_AGE_S = 600  # без изменений"))
 
+    def test_max_leverage_cannot_be_loosened(self):
+        # RISK-LEVERAGE-CAP: потолок плеча 3x
+        self.assertIsNotNone(edit("replace_string_in_file", filePath="src/risk.py",
+                                  oldString="MAX_LEVERAGE = 3", newString="MAX_LEVERAGE = 10"))
+        self.assertIsNotNone(edit("create_file", filePath="src/strategy.py",
+                                  content="from . import risk\nrisk.MAX_LEVERAGE = 20\n"))
+        self.assertIsNone(edit("replace_string_in_file", filePath="src/risk.py",
+                               oldString="MAX_LEVERAGE = 3", newString="MAX_LEVERAGE = 2"))
+
     def test_limit_monkeypatch_from_other_module(self):
         self.assertIsNotNone(edit("create_file", filePath="src/dca_bot.py",
                                   content="from . import risk\nrisk.MAX_POSITION_PCT = 50\n"))
