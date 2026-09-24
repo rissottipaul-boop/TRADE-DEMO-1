@@ -1,25 +1,36 @@
 """Режим аккаунта и спот-ордера (SPOT-TDMODE): src/account_mode.py, OrderRouter, live-preflight.
+CLI проверки и смены режима (ACCT-SWITCH-CLI): status, precheck, switch — классы в конце файла.
 
 Сеть не используется. Запрос CCXT проверяется настоящим ccxt.okx на рынке,
 заданном вручную (create_order_request без отправки). Ответы account/config и
 account/balance — как у demo OKX 24.09 (insights/okx-api.md §10 п. 22).
+Ответы precheck — по документации OKX (на demo не проверены, okx-api.md §10 п. 24).
 """
+import contextlib
+import io
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import ccxt
 
-from src import risk
+from src import account_mode, risk
 from src.account_mode import (
     MARKET_BUY_BUFFER,
     AccountMode,
     check_no_borrow,
+    describe_error,
     fetch_account_mode,
     is_spot,
     parse_account_mode,
+    parse_switch_precheck,
+    precheck_switch,
     spot_legs,
     spot_order_params,
+    switch_account_level,
 )
 from src.connector import OKXExchange
 from src.dca_bot import DCABot
@@ -315,6 +326,326 @@ class PreflightTest(unittest.TestCase):
     def test_unknown_mode(self):
         self.assertEqual(self.spot_borrow("live", {"acctLv": ""}), "fail")
         self.assertEqual(self.spot_borrow("demo", {"acctLv": ""}), "info")
+
+
+# --- ACCT-SWITCH-CLI: status, precheck, switch ---
+
+# data[0] precheck — формат из документации OKX (preCheckAccountLevel.md), переход 3 → 2
+CLEAN_PRECHECK = {
+    "acctLv": "2", "curAcctLv": "3", "posList": [], "posTierCheck": [], "riskOffsetType": "",
+    "sCode": "0", "unmatchedInfoCheck": [],
+    "mgnBf": {"acctAvailEq": "103773.7", "details": [], "mgnRatio": ""},
+    "mgnAft": {"acctAvailEq": "", "details": [{"ccy": "USDT", "availEq": "6132.1", "mgnRatio": ""}], "mgnRatio": ""},
+}
+BLOCKED_PRECHECK = {
+    "acctLv": "2", "curAcctLv": "3", "mgnAft": None, "mgnBf": None, "posList": [], "posTierCheck": [],
+    "riskOffsetType": "", "sCode": "1",
+    "unmatchedInfoCheck": [
+        {"posList": [], "totalAsset": "", "type": "pending_algos"},
+        {"posList": ["2005456500916518912"], "totalAsset": "", "type": "cross_margin"},
+    ],
+}
+# Так CCXT 4.5 оформляет отказ OKX (okx.handle_errors): «okx » + тело ответа
+ERR_51070 = ('okx {"code":"51070","data":[],"msg":"You do not meet the requirements for switching to '
+             'this account mode. Please upgrade the account mode on the OKX website or App"}')
+ERR_59132 = ('okx {"code":"59132","data":[],"msg":"Unable to switch. Please close or cancel all open orders '
+             'and refer to the pre-check endpoint to stop any incompatible bots."}')
+
+
+class SwitchFakeOkx:
+    """account/config, precheck и set-account-level без сети; demo-заголовок — как у CCXT sandbox."""
+
+    def __init__(self, acct_lv="3", precheck=None, applies=True, lag_reads=0, errors=None):
+        self.config = {"acctLv": acct_lv, "autoLoan": True, "enableSpotBorrow": False, "posMode": "net_mode"}
+        self.precheck_response = {"code": "0", "data": [dict(CLEAN_PRECHECK if precheck is None else precheck)]}
+        self.applies = applies        # False: POST принят, а режим не сменился
+        self.lag_reads = lag_reads    # столько чтений account/config после POST ещё видят старый режим
+        self.pending = None
+        self.errors = dict(errors or {})  # шаг (config | precheck | set_level) -> исключение
+        self.calls: list = []
+        self.headers = {"x-simulated-trading": "1"}
+
+    def _step(self, name, call):
+        self.calls.append(call)
+        if name in self.errors:
+            raise self.errors[name]
+
+    def private_get_account_config(self, params=None):
+        self._step("config", "config")
+        if self.pending is not None:
+            if self.lag_reads:
+                self.lag_reads -= 1
+            else:
+                self.config["acctLv"], self.pending = self.pending, None
+        return {"code": "0", "data": [dict(self.config)]}
+
+    def private_get_account_set_account_switch_precheck(self, params=None):
+        self._step("precheck", ("precheck", (params or {}).get("acctLv")))
+        return self.precheck_response
+
+    def private_post_account_set_account_level(self, params=None):
+        level = (params or {}).get("acctLv")
+        self._step("set_level", ("set_level", level))
+        if self.applies:
+            self.pending = level
+        return {"code": "0", "data": [{"acctLv": level}]}
+
+
+def run_cli(argv, exchange=None, env_mode="demo"):
+    """account_mode.main без сети: (код выхода, stdout, stderr, фабрика биржи)."""
+    factory = mock.Mock(return_value=exchange)
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(account_mode, "_exchange", factory), \
+            mock.patch.object(account_mode, "CONFIRM_DELAY_S", 0), \
+            mock.patch.dict(os.environ, {"OKX_MODE": env_mode}), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = account_mode.main(argv)
+        except SystemExit as exc:  # argparse: неверный аргумент — выход 2 до сети
+            code = exc.code
+    return code, out.getvalue(), err.getvalue(), factory
+
+
+class SwitchPrecheckParseTest(unittest.TestCase):
+    """Разбор ответа precheck: поля по документации OKX, всё непонятное — блокер."""
+
+    def test_clean(self):
+        check = parse_switch_precheck(CLEAN_PRECHECK, "2")
+        self.assertTrue(check.ok)
+        self.assertEqual((check.s_code, check.cur_acct_lv, check.blockers), ("0", "3", ()))
+        self.assertIn("acctAvailEq 103773.7", check.margin_before)
+        self.assertIn("USDT: availEq 6132.1", check.margin_after)
+
+    def test_blockers_have_type_and_meaning(self):
+        check = parse_switch_precheck(BLOCKED_PRECHECK, "2")
+        self.assertFalse(check.ok)
+        self.assertEqual(len(check.blockers), 2)
+        self.assertIn("pending_algos: активные algo-ордера и торговые боты", check.blockers[0])
+        self.assertIn("cross_margin", check.blockers[1])
+        self.assertIn("позиции 2005456500916518912", check.blockers[1])
+
+    def test_pos_list_as_strings_or_objects(self):
+        # документация OKX: строки posId; модель OKX.Net: объекты {posId, lever}
+        for pos_list in (["111"], [{"posId": "111", "lever": "5"}]):
+            item = {"sCode": "1", "acctLv": "2", "unmatchedInfoCheck": [{"type": "all_positions", "posList": pos_list}]}
+            self.assertIn("позиции 111", parse_switch_precheck(item, "2").blockers[0], pos_list)
+
+    def test_other_codes_and_inconsistent_answers_block(self):
+        tier = {"instType": "SWAP", "instFamily": "BTC-USDT", "pos": "10", "lever": "20", "maxSz": "5"}
+        cases = {
+            "неизвестный sCode": {"sCode": "7"},
+            "нет sCode": {"unmatchedInfoCheck": []},
+            "sCode 1 без перечня": {"sCode": "1"},
+            "sCode 3 — нет preset плеча": {"sCode": "3", "posList": [{"posId": "9", "lever": "10"}]},
+            "sCode 4 — тиры": {"sCode": "4", "posTierCheck": [tier]},
+            "sCode 0, но есть блокер": dict(CLEAN_PRECHECK, unmatchedInfoCheck=[{"type": "pending_orders"}]),
+            "ответ не для запрошенного режима": dict(CLEAN_PRECHECK, acctLv="3"),
+        }
+        for name, item in cases.items():
+            check = parse_switch_precheck(item, "2")
+            self.assertFalse(check.ok, name)
+            self.assertTrue(check.blockers, name)
+        self.assertIn("допустимо 5", parse_switch_precheck(cases["sCode 4 — тиры"], "2").blockers[0])
+        self.assertEqual(parse_switch_precheck(cases["sCode 3 — нет preset плеча"], "2").positions, ("9 ×10",))
+
+    def test_nulls_and_empty_strings_are_tolerated(self):
+        item = {"sCode": "0", "acctLv": "2", "curAcctLv": "3", "mgnBf": "", "mgnAft": None,
+                "posList": None, "posTierCheck": "", "unmatchedInfoCheck": None}
+        check = parse_switch_precheck(item, "2")
+        self.assertTrue(check.ok)
+        self.assertEqual((check.margin_before, check.margin_after, check.positions), ("", "", ()))
+
+
+class StatusCliTest(unittest.TestCase):
+    def test_status_shows_mode_flags_and_borrow(self):
+        ex = SwitchFakeOkx(acct_lv="3")
+        code, out, _, factory = run_cli(["status"], ex)
+        self.assertEqual(code, 0)
+        for text in ("acctLv 3 (Multi-currency margin)", "autoLoan: true", "enableSpotBorrow: false",
+                     "posMode: net_mode", "tdMode спота: cross", "заём спот-ордером: возможен"):
+            self.assertIn(text, out)
+        self.assertEqual(ex.calls, ["config"])
+        factory.assert_called_once_with("demo")
+
+    def test_status_live_is_read_only(self):
+        ex = SwitchFakeOkx(acct_lv="2")
+        code, out, _, factory = run_cli(["status", "--mode", "live"], ex)
+        self.assertEqual(code, 0)
+        self.assertIn("[live]: acctLv 2 (Spot and futures)", out)
+        self.assertIn("заём спот-ордером: невозможен", out)  # autoLoan в режимах 1–2 не действует
+        factory.assert_called_once_with("live")
+
+
+class PrecheckCliTest(unittest.TestCase):
+    def test_clean_exit_0(self):
+        ex = SwitchFakeOkx()
+        code, out, _, factory = run_cli(["precheck", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 0)
+        self.assertIn("Итог: можно переключать", out)
+        self.assertIn("ответ OKX:", out)  # сырой ответ: поля на demo ещё не проверены
+        self.assertEqual(ex.calls, [("precheck", "2")])  # только GET precheck
+        factory.assert_called_once_with("demo")
+
+    def test_blockers_exit_1_with_list(self):
+        ex = SwitchFakeOkx(precheck=BLOCKED_PRECHECK)
+        code, out, _, _ = run_cli(["precheck", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 1)
+        for text in ("блокеры (2)", "pending_algos", "cross_margin", "Итог: переключать нельзя, блокеров 2"):
+            self.assertIn(text, out)
+        self.assertEqual(ex.calls, [("precheck", "2")])
+
+    def test_code_2_without_exception_exit_2(self):
+        # CCXT не бросает исключение на code 2 («частичный успех») — его ловит _response_data
+        ex = SwitchFakeOkx()
+        ex.precheck_response = {"code": "2", "data": [], "msg": "partial"}
+        code, _, err, _ = run_cli(["precheck", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 2)
+        self.assertIn("OKX 2", err)
+
+
+class SwitchCliTest(unittest.TestCase):
+    def test_live_is_refused_without_network(self):
+        code, _, err, factory = run_cli(["switch", "--acct-lv", "2", "--mode", "live"], SwitchFakeOkx())
+        self.assertEqual(code, 2)
+        self.assertIn("только человек", err)
+        factory.assert_not_called()
+
+    def test_live_settings_are_refused_without_network(self):
+        # OKX_MODE=live в окружении, --mode не задан
+        code, _, err, factory = run_cli(["switch", "--acct-lv", "2"], SwitchFakeOkx(), env_mode="live")
+        self.assertEqual(code, 2)
+        self.assertIn("Отказ", err)
+        factory.assert_not_called()
+
+    def test_client_without_demo_header_is_refused(self):
+        ex = SwitchFakeOkx()
+        ex.headers = {}
+        code, _, err, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 2)
+        self.assertIn("x-simulated-trading", err)
+        self.assertEqual(ex.calls, [])
+        with self.assertRaises(PermissionError):
+            switch_account_level(ex, "2")
+
+    def test_blockers_stop_before_post(self):
+        ex = SwitchFakeOkx(precheck=BLOCKED_PRECHECK)
+        code, out, _, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 1)
+        self.assertEqual(ex.calls, ["config", ("precheck", "2")])
+        self.assertIn("pending_algos", out)
+        self.assertIn("POST не отправлялся", out)
+        self.assertEqual(ex.config["acctLv"], "3")
+
+    def test_success_posts_and_rereads_config(self):
+        ex = SwitchFakeOkx()
+        code, out, _, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(ex.calls, ["config", ("precheck", "2"), ("set_level", "2"), "config"])
+        self.assertEqual(ex.config["acctLv"], "2")
+        self.assertIn("account/config: acctLv 2 (Spot and futures), tdMode спота cash, заём спот-ордером невозможен",
+                      out)
+        self.assertIn("Итог: режим переключён на 2 (Spot and futures) и подтверждён account/config", out)
+
+    def test_config_lag_is_waited_out(self):
+        ex, sleeps = SwitchFakeOkx(lag_reads=1), []
+        result = switch_account_level(ex, "2", attempts=3, delay_s=1.5, sleep=sleeps.append)
+        self.assertEqual((result.status, result.exit_code, result.after.acct_lv), ("switched", 0, "2"))
+        self.assertEqual(ex.calls.count("config"), 3)  # до POST + 2 после
+        self.assertEqual(sleeps, [1.5])
+
+    def test_unconfirmed_exit_1(self):
+        ex = SwitchFakeOkx(applies=False)
+        code, out, _, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 1)
+        self.assertEqual(ex.calls, ["config", ("precheck", "2"), ("set_level", "2"), "config", "config", "config"])
+        self.assertIn("переключение не подтверждено", out)
+        sleeps = []
+        result = switch_account_level(SwitchFakeOkx(applies=False), "2", attempts=3, delay_s=1.5, sleep=sleeps.append)
+        self.assertEqual((result.status, result.exit_code, result.after.acct_lv), ("unconfirmed", 1, "3"))
+        self.assertEqual(sleeps, [1.5, 1.5])
+
+    def test_same_mode_skips_precheck_and_post(self):
+        ex = SwitchFakeOkx(acct_lv="2")
+        code, out, _, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 0)
+        self.assertEqual(ex.calls, ["config"])
+        self.assertIn("режим уже 2 (Spot and futures)", out)
+
+    def test_invalid_level_fails_before_network(self):
+        for bad in ("5", "0", "two", ""):
+            code, _, err, factory = run_cli(["switch", "--acct-lv", bad], SwitchFakeOkx())
+            self.assertEqual(code, 2, bad)
+            self.assertIn("от 1 до 4", err)
+            factory.assert_not_called()
+        ex = SwitchFakeOkx()
+        for bad in ("5", 0, None):
+            with self.assertRaises(ValueError):
+                switch_account_level(ex, bad)
+            with self.assertRaises(ValueError):
+                precheck_switch(ex, bad)
+        self.assertEqual(ex.calls, [])
+
+    def test_okx_error_on_precheck_exit_2(self):
+        # 51070: первое включение режима — только в Web/App
+        ex = SwitchFakeOkx(errors={"precheck": ccxt.ExchangeError(ERR_51070)})
+        code, _, err, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 2)
+        self.assertIn("OKX 51070", err)
+        self.assertIn("Web/App", err)
+        self.assertNotIn(("set_level", "2"), ex.calls)
+
+    def test_okx_error_on_post_exit_2(self):
+        ex = SwitchFakeOkx(errors={"set_level": ccxt.ExchangeError(ERR_59132)})
+        code, _, err, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 2)
+        self.assertIn("OKX 59132", err)
+        self.assertIn("python -m src.account_mode status", err)  # после сбоя — проверить режим
+        self.assertEqual(ex.config["acctLv"], "3")
+
+    def test_network_error_exit_2(self):
+        ex = SwitchFakeOkx(errors={"set_level": ccxt.RequestTimeout("okx POST https://www.okx.com/api/v5/account/set-account-level")})
+        code, _, err, _ = run_cli(["switch", "--acct-lv", "2"], ex)
+        self.assertEqual(code, 2)
+        self.assertIn("RequestTimeout", err)
+        self.assertIn("python -m src.account_mode status", err)
+
+
+class CcxtSwitchRequestTest(unittest.TestCase):
+    """Настоящий ccxt.okx собирает и подписывает запросы как в бою; HTTP подменён — сети нет."""
+
+    class Offline(OKXExchange):
+        def __init__(self, responses):
+            super().__init__({"apiKey": "k", "secret": "s", "password": "p", "enableRateLimit": False})
+            self.set_sandbox_mode(True)
+            self.responses, self.sent = responses, []
+
+        def fetch(self, url, method="GET", headers=None, body=None):
+            request_headers = self.prepare_request_headers(headers)
+            path = url.split("/api/v5/", 1)[1]
+            self.sent.append((method, path, request_headers.get("x-simulated-trading"), body))
+            response = self.responses[path.split("?", 1)[0]]
+            self.handle_errors(200, "OK", url, method, {}, json.dumps(response), response, request_headers, body)
+            return response
+
+    def test_precheck_is_get_with_query_and_demo_header(self):
+        ex = self.Offline({"account/set-account-switch-precheck": {"code": "0", "data": [CLEAN_PRECHECK]}})
+        self.assertTrue(precheck_switch(ex, 2).ok)
+        self.assertEqual(ex.sent, [("GET", "account/set-account-switch-precheck?acctLv=2", "1", None)])
+
+    def test_set_level_is_post_with_json_body(self):
+        ex = self.Offline({"account/set-account-level": {"code": "0", "data": [{"acctLv": "2"}]}})
+        self.assertEqual(account_mode._post_account_level(ex, "2"), "2")
+        method, path, demo, body = ex.sent[0]
+        self.assertEqual((method, path, demo, json.loads(body)), ("POST", "account/set-account-level", "1",
+                                                                  {"acctLv": "2"}))
+
+    def test_okx_error_reaches_explain_error(self):
+        ex = self.Offline({"account/set-account-switch-precheck": json.loads(ERR_51070[len("okx "):])})
+        with self.assertRaises(ccxt.ExchangeError) as ctx:
+            precheck_switch(ex, "2")
+        text = describe_error(ctx.exception)
+        self.assertIn("OKX 51070", text)
+        self.assertIn("Web/App", text)
 
 
 if __name__ == "__main__":
