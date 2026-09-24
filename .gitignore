@@ -21,3 +21,9 @@ logs/
 # IDE
 .vscode/
 .idea/
+
+# Obsidian: общие настройки хранилища — в git; раскладка окон, плагины (их data.json бывает с токенами), темы — нет
+.obsidian/*
+!.obsidian/app.json
+!.obsidian/templates.json
+.trash/

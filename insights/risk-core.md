@@ -195,9 +195,9 @@ def status() -> dict:
 
 ## 7. Источники
 
-1. [.agents/skills/position-sizer/SKILL.md](../.agents/skills/position-sizer/SKILL.md) — формулы fixed-fractional/ATR/Kelly, 1% rule, portfolio heat 6–8%, floor-округление, проверка ликвидации, ctVal-таблица
-2. [.agents/skills/resilience-trader/SKILL.md](../.agents/skills/resilience-trader/SKILL.md) — P1 (2% max risk), P2 (дневной −6%, сброс 00:00 UTC), P3 (макс. 2 позиции, без хеджа), 15% cap позиции, стоп 3%
-3. [.agents/skills/rookie-airbag/SKILL.md](../.agents/skills/rookie-airbag/SKILL.md) — серия убытков → пауза, лимит сделок/день, чистка残留算法单, isolated-по-умолчанию, ловушки плеча, проверка %-от-аккаунта перед ордером
+1. `.agents/skills/position-sizer/SKILL.md` — формулы fixed-fractional/ATR/Kelly, 1% rule, portfolio heat 6–8%, floor-округление, проверка ликвидации, ctVal-таблица
+2. `.agents/skills/resilience-trader/SKILL.md` — P1 (2% max risk), P2 (дневной −6%, сброс 00:00 UTC), P3 (макс. 2 позиции, без хеджа), 15% cap позиции, стоп 3%
+3. `.agents/skills/rookie-airbag/SKILL.md` — серия убытков → пауза, лимит сделок/день, чистка残留算法单, isolated-по-умолчанию, ловушки плеча, проверка %-от-аккаунта перед ордером
 4. [insights/roadmap.md](roadmap.md) — Фаза 3: риск-модуль, kill-switch, circuit breaker, блокировка пары
 5. [insights/phase0-demo-setup.md](phase0-demo-setup.md) — §2.5 risk до стратегии, §2.6 kill-switch, §2.3 журналирование риск-событий
 
