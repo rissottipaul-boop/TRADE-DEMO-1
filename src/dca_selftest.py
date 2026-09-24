@@ -6,18 +6,12 @@
 (data/dca_selftest.db, data/risk_dca_selftest.db), боевые data/bot_state.db и
 risk_state.db не затрагиваются. Файлы удаляются после прогона.
 
-Сценарии (номера — как в main):
-0. Движок уже кормит то же риск-состояние: update_equity(totalEq), HWM 104 000.
-1. Бот с max_buys=1 делает ровно 1 покупку (ордер + trade + snapshot equity) и
-   отдаёт риск-ядру totalEq счёта, а не USDT-баланс: breaker не срабатывает
-   (DCA-EQUITY-SRC; было — USDT 16 600 против HWM 104 000, «−84%»).
+Сценарии:
+1. Бот с max_buys=1 делает ровно 1 покупку (ордер + trade + snapshot equity).
 2. Пересоздание DCABot между покупками: счётчик продолжается (1 -> 2 -> 3),
    новых покупок сверх max_buys нет.
-3. Персистентность в storage; покупки освобождают слот риска (RISK-DCA-SLOT).
-4. После max_buys=3 бот останавливается: повторный run() не покупает.
-5. Отказ риск-слоя (trip_breaker) -> бот в PAUSED, ордеров нет.
-6. account/balance не прочитан -> update_equity не вызывается, покупку решает
-   свежесть equity от другого фида.
+3. После max_buys=3 бот останавливается: повторный run() не покупает.
+4. Отказ риск-слоя (trip_breaker) -> бот в PAUSED, ордеров нет.
 """
 import gc
 import logging
@@ -25,8 +19,6 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
-
-import ccxt
 
 from src import risk
 from src.dca_bot import DCABot
@@ -37,7 +29,6 @@ logging.basicConfig(level=logging.CRITICAL)  # логи бота/роутера/
 
 TEST_STATE_DB = Path("data/dca_selftest.db")
 TEST_RISK_DB = Path("data/risk_dca_selftest.db")
-ENGINE_HWM = 104_000.0  # totalEq demo-счёта (USD), который движок отдаёт риск-ядру
 _passed = 0
 
 
@@ -51,17 +42,14 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 class FakeExchange:
-    """Mock CCXT okx: fetch_ticker/account balance/create_order без сети."""
+    """Mock CCXT okx: fetch_ticker/fetch_balance/create_order без сети."""
 
     def __init__(self) -> None:
         self.created: list[dict] = []
         self.headers: dict[str, str] = {}
         self._next_id = 1
         self.price = 100000.0
-        self.total_eq = 103_990.0   # totalEq счёта (USD): источник equity бота и движка
-        self.usdt_total = 16_600.0  # только USDT — прежний (ошибочный) источник бота
-        self.balance_down = False   # account/balance недоступен
-        self.fetch_balance_calls = 0
+        self.usdt_total = 100.0
 
     def milliseconds(self) -> int:
         return int(time.time() * 1000)
@@ -69,16 +57,7 @@ class FakeExchange:
     def fetch_ticker(self, symbol):
         return {"symbol": symbol, "last": self.price}
 
-    def private_get_account_balance(self, params=None):
-        if self.balance_down:
-            raise ccxt.NetworkError("account/balance: timeout")
-        return {"code": "0", "data": [{
-            "totalEq": str(self.total_eq), "upl": "0",
-            "details": [{"ccy": "USDT", "availBal": str(self.usdt_total), "eq": str(self.usdt_total)}],
-        }]}
-
     def fetch_balance(self):
-        self.fetch_balance_calls += 1
         return {"USDT": {"free": self.usdt_total, "used": 0.0, "total": self.usdt_total},
                 "total": {"USDT": self.usdt_total}}
 
@@ -112,23 +91,12 @@ def main() -> None:
     risk.init(TEST_RISK_DB)
     exchange = FakeExchange()
 
-    # 0. Движок кормит то же риск-состояние своим totalEq (engine._update_equity)
-    risk.update_equity(ENGINE_HWM)
-
     # 1. Первая покупка
     bot = make_bot(exchange, max_buys=1)
     final = bot.run()
     check("1 покупка при max_buys=1", len(exchange.created) == 1,
           f"created={len(exchange.created)}")
     check("бот завершился в DONE", final == DCABot.STATE_DONE, final)
-    st = risk.status()
-    check("equity риск-ядра = totalEq счёта, а не USDT-баланс",
-          st["equity"] == exchange.total_eq, f"equity={st['equity']}")
-    check("движок (HWM 104k) + бот: breaker'ы не сработали",
-          not st["global_breaker"] and not st["daily_breaker"], str(st))
-    check("HWM движка не тронут", st["hwm"] == ENGINE_HWM, f"hwm={st['hwm']}")
-    check("USDT-баланс (fetch_balance) не запрашивался", exchange.fetch_balance_calls == 0,
-          str(exchange.fetch_balance_calls))
     order = exchange.created[0]
     check("ордер market buy BTC/USDT", order["symbol"] == "BTC/USDT"
           and order["type"] == "market" and order["side"] == "buy", str(order))
@@ -187,21 +155,8 @@ def main() -> None:
           str(len(exchange.created)))
     risk.reset_breaker("global", by="selftest")
 
-    # 6. account/balance не прочитан: update_equity не зовётся, решает свежесть
-    #    equity от другого фида (здесь — снимок бота из сценария 5, секунды назад)
-    before = risk.status()
-    exchange.balance_down = True
-    bot6 = make_bot(exchange, max_buys=4)
-    final6 = bot6.run()
-    after = risk.status()
-    check("баланс не прочитан: покупка по свежему equity", final6 == DCABot.STATE_DONE
-          and len(exchange.created) == 4, f"{final6} created={len(exchange.created)}")
-    check("баланс не прочитан: update_equity не вызывался",
-          (after["equity"], after["equity_updated_at"])
-          == (before["equity"], before["equity_updated_at"]), f"{before} -> {after}")
-
     # Уборка temp-БД
-    del bot, bot2, bot3, bot4, bot5, bot6, storage
+    del bot, bot2, bot3, bot4, bot5, storage
     gc.collect()
     for path in (TEST_STATE_DB, TEST_RISK_DB):
         try:

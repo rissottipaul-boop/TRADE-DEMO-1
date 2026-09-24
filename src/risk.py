@@ -15,13 +15,6 @@ Equity и HWM ведёт только update_equity — баланс биржи 
 (RISK-PNL-DOUBLE). Без свежего equity (EQUITY_MAX_AGE_S) вход запрещён:
 breaker'ы по просадке без фида equity слепы.
 
-Выход из позиции (ROUTER-EXIT) — не вход. check_exit_allowed не смотрит на
-kill-switch, breaker'ы, свежесть equity и лимит входов: в аварии разрешены
-выходы, отмены и чтение. Зато выход проходит только из зарегистрированной
-позиции: сторона противоположная, размер не больше остатка. Остаток хранится
-в risk_position_size. По исполнению выхода release_position уменьшает его, а у
-нуля освобождает слот risk_open_risk.
-
 Состояние — собственный SQLite-файл data/risk_state.db (переживает рестарт,
 breaker не снимается перезапуском). Только stdlib. Сетевых вызовов нет:
 kill_switch дёргает коннектор через колбэк set_order_canceller().
@@ -31,7 +24,6 @@ import math
 import sqlite3
 import threading
 import time
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,24 +66,6 @@ def _utc_now() -> float:
 
 def _utc_day(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-
-
-# Выход (ROUTER-EXIT): сторона выхода для стороны позиции
-_EXIT_SIDE = {"buy": "sell", "sell": "buy"}
-
-
-def _positive(value: Any) -> Optional[float]:
-    """Конечное число > 0 или None: размер выхода, исполненный объём."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) and number > 0 else None
-
-
-def _same_size(a: float, b: float) -> bool:
-    """Размеры равны с точностью до погрешности float."""
-    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
 
 
 class _RiskCore:
@@ -139,17 +113,6 @@ class _RiskCore:
                     side TEXT NOT NULL,
                     risk_pct REAL NOT NULL,
                     opened_at REAL NOT NULL
-                );
-                -- Остаток позиции для выхода (ROUTER-EXIT). Отдельная таблица, а не
-                -- колонка risk_open_risk: процессы на старом коде пишут туда INSERT без
-                -- списка колонок, и лишняя колонка сломала бы им register_entry.
-                -- Запись действительна, пока слот с теми же side и opened_at на месте.
-                CREATE TABLE IF NOT EXISTS risk_position_size (
-                    inst_id TEXT PRIMARY KEY,
-                    side TEXT NOT NULL,
-                    opened_at REAL NOT NULL,
-                    sz REAL NOT NULL,
-                    pos_id TEXT NOT NULL
                 );
             """)
 
@@ -373,149 +336,6 @@ class _RiskCore:
             self._log_event("spot_buy", inst_id=inst_id,
                             detail=f"доливка спот-позиции, слот риска освобождён "
                                    f"(удалено записей: {cur.rowcount})")
-
-    # --- Выход из позиции (ROUTER-EXIT) ---
-    #
-    # Остаток позиции хранится в risk_position_size и привязан к слоту
-    # risk_open_risk по (inst_id, side, opened_at). Запись становится
-    # недействительной, если по тому же inst_id прошёл новый register_entry
-    # (другой opened_at) или слот удалили register_spot_buy или record_pnl.
-    # Тогда остаток неизвестен, и выход через роутер отклоняется: это
-    # безопасная сторона. pos_id отличает позицию от следующей на том же
-    # inst_id, поэтому поздно исполненный старый выход новую позицию не тронет.
-
-    def register_entry_size(self, inst_id: str, side: str, sz: Any) -> bool:
-        """Размер входа для слота, который только что занял register_entry.
-
-        Это верхняя граница позиции: размер ордера, а не исполнения. Выход
-        сверяется с ней, а фактический объём ограничивает биржа: на споте —
-        баланс и запрет займа, на контрактах — reduceOnly. Лимиты, счётчики и
-        heat не трогает. False — слота с этой стороной нет или размер
-        некорректен. Тогда размер не записан, и выход через роутер отклоняется.
-        """
-        size = _positive(sz)
-        with self._lock:
-            with self._conn() as conn:
-                slot = conn.execute(
-                    "SELECT side, opened_at FROM risk_open_risk WHERE inst_id=?", (inst_id,)
-                ).fetchone()
-                if size is None or slot is None or slot["side"] != side:
-                    log.warning("register_entry_size %s %s sz=%r: слота с этой стороной нет или "
-                                "размер некорректен — размер не записан", inst_id, side, sz)
-                    return False
-                conn.execute(
-                    "INSERT OR REPLACE INTO risk_position_size "
-                    "(inst_id, side, opened_at, sz, pos_id) VALUES (?, ?, ?, ?, ?)",
-                    (inst_id, side, slot["opened_at"], size, uuid.uuid4().hex),
-                )
-            return True
-
-    def open_position(self, inst_id: str) -> Optional[dict]:
-        """Открытая позиция по inst_id или None, если слота нет.
-
-        Поля слота risk_open_risk (side, risk_pct, opened_at) и остаток sz с
-        pos_id из risk_position_size. sz и pos_id равны None, если остаток
-        неизвестен: вход зарегистрирован без размера (движок, грид) или запись
-        размера относится к прежнему слоту.
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT o.inst_id, o.side, o.risk_pct, o.opened_at, s.sz, s.pos_id "
-                "FROM risk_open_risk AS o LEFT JOIN risk_position_size AS s "
-                "ON s.inst_id = o.inst_id AND s.side = o.side AND s.opened_at = o.opened_at "
-                "WHERE o.inst_id=?",
-                (inst_id,),
-            ).fetchone()
-        return dict(row) if row else None
-
-    def check_exit_allowed(self, inst_id: str, side: str,
-                           sz: Any = None) -> tuple[bool, str, Optional[dict]]:
-        """Допуск ВЫХОДА из позиции — не входа.
-
-        Kill-switch, breaker'ы, свежесть equity, системная пауза, лимит
-        входов, блокировка инструмента, хедж и heat здесь НЕ проверяются: в
-        аварии разрешены выходы, отмены и чтение. Поэтому выход не должен
-        открывать или наращивать позицию, и проверяется другое:
-        - по inst_id есть открытая позиция (слот risk_open_risk);
-        - сторона выхода противоположна стороне позиции;
-        - остаток известен, размер выхода больше нуля и не больше остатка.
-        sz=None — выход на весь остаток. Возвращает (True, "ok", позиция
-        open_position с полем exit_sz) или (False, причина, None).
-        """
-        with self._lock:
-            pos = self.open_position(inst_id)
-            if pos is None:
-                return False, (f"по {inst_id} нет открытой позиции в риск-ядре — выход не может "
-                               f"открыть позицию (вход — через place_order)"), None
-            exit_side = _EXIT_SIDE.get(pos["side"])
-            if exit_side is None:
-                return False, (f"позиция {inst_id} зарегистрирована со стороной {pos['side']!r} — "
-                               f"сторона выхода не определена"), None
-            if side != exit_side:
-                return False, (f"позиция {inst_id} — {pos['side']}, выход только {exit_side}: "
-                               f"{side} открыл бы или нарастил позицию"), None
-            remaining = pos["sz"]
-            if remaining is None:
-                return False, (f"остаток позиции {inst_id} неизвестен (вход зарегистрирован без "
-                               f"размера) — размер выхода не проверить, закройте позицию вручную"), None
-            if sz is None:
-                exit_sz = remaining
-            else:
-                exit_sz = _positive(sz)
-                if exit_sz is None:
-                    return False, f"некорректный размер выхода {sz!r}", None
-                if exit_sz > remaining and not _same_size(exit_sz, remaining):
-                    return False, (f"размер выхода {exit_sz:g} больше остатка позиции {inst_id} "
-                                   f"{remaining:g} — излишек открыл бы встречную позицию"), None
-            return True, "ok", {**pos, "exit_sz": exit_sz}
-
-    def release_position(self, inst_id: str, filled_sz: Any,
-                         pos_id: Optional[str] = None) -> dict:
-        """Исполненный ВЫХОД: уменьшить остаток, а у нуля освободить слот.
-
-        filled_sz — исполненный объём выхода, а не размер ордера: слот
-        освобождается по исполнению, а не по выставлению. Когда остаток доходит
-        до нуля, позиция закрыта: слот risk_open_risk и запись размера
-        удаляются, heat уменьшается, и по inst_id снова возможен вход. Иначе
-        остаток уменьшается, а слот и его risk_pct остаются до полного выхода.
-        pos_id — позиция, для которой проверялся выход. Если позиция сменилась,
-        остаток неизвестен или слота нет, ничего не меняется: занятый слот лишь
-        запрещает вход, это безопасная сторона. Серии убытков, day_pnl и equity
-        не трогает, это делает record_pnl. Возвращает
-        {released, remaining, closed, reason}.
-        """
-        size = _positive(filled_sz)
-        with self._lock:
-            pos = self.open_position(inst_id)
-            skip = ""
-            if size is None:
-                skip = f"исполнено {filled_sz!r} — освобождать нечего"
-            elif pos is None:
-                skip = "слота нет — позиция уже закрыта"
-            elif pos["sz"] is None:
-                skip = "остаток неизвестен — слот не трогаем"
-            elif pos_id is not None and pos["pos_id"] != pos_id:
-                skip = "позиция сменилась после выставления выхода — новую не трогаем"
-            if skip:
-                if size is not None:
-                    self._log_event("exit_release_skipped", inst_id=inst_id,
-                                    detail=f"исполнено {size:g}: {skip}")
-                return {"released": 0.0, "remaining": pos["sz"] if pos else None,
-                        "closed": False, "reason": skip}
-            closed = size > pos["sz"] or _same_size(size, pos["sz"])
-            remaining = 0.0 if closed else pos["sz"] - size
-            with self._conn() as conn:
-                if closed:
-                    conn.execute("DELETE FROM risk_open_risk WHERE inst_id=? AND opened_at=?",
-                                 (inst_id, pos["opened_at"]))
-                    conn.execute("DELETE FROM risk_position_size WHERE inst_id=?", (inst_id,))
-                else:
-                    conn.execute("UPDATE risk_position_size SET sz=? WHERE inst_id=? AND pos_id=?",
-                                 (remaining, inst_id, pos["pos_id"]))
-            self._log_event("position_closed" if closed else "position_reduced", inst_id=inst_id,
-                            detail=f"выход исполнен {size:g}: остаток {pos['sz']:g} -> {remaining:g}")
-            return {"released": min(size, pos["sz"]), "remaining": remaining,
-                    "closed": closed, "reason": "ok"}
 
     def record_pnl(self, inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
         """Результат закрытой сделки: дневной PnL, серии убытков, блокировки, пауза.
@@ -804,34 +624,6 @@ def register_spot_buy(inst_id: str) -> None:
     на серии убытков, day_pnl и equity. Счётчик entries_today учитывает покупку
     через register_entry в OrderRouter."""
     _c().register_spot_buy(inst_id)
-
-
-def register_entry_size(inst_id: str, side: str, sz: Any) -> bool:
-    """Размер входа для слота register_entry (ROUTER-EXIT): верхняя граница
-    позиции, с которой сверяется выход. Лимиты, счётчики и heat не трогает."""
-    return _c().register_entry_size(inst_id, side, sz)
-
-
-def open_position(inst_id: str) -> Optional[dict]:
-    """Слот risk_open_risk и остаток sz с pos_id (None — остаток неизвестен) или None."""
-    return _c().open_position(inst_id)
-
-
-def check_exit_allowed(inst_id: str, side: str,
-                       sz: Any = None) -> tuple[bool, str, Optional[dict]]:
-    """Допуск выхода (ROUTER-EXIT): позиция есть, сторона противоположна,
-    размер не больше остатка. Kill-switch, breaker'ы и свежесть equity выход не
-    блокируют. Отказы пишутся в журнал риск-событий."""
-    allowed, reason, position = _c().check_exit_allowed(inst_id, side, sz)
-    if not allowed:
-        _c()._log_event("exit_denied", inst_id=inst_id, detail=f"side={side} sz={sz!r}: {reason}")
-    return allowed, reason, position
-
-
-def release_position(inst_id: str, filled_sz: Any, pos_id: Optional[str] = None) -> dict:
-    """Исполненный выход (ROUTER-EXIT): остаток уменьшается на filled_sz, у нуля
-    слот освобождается. Это не record_pnl: серии и day_pnl не меняет."""
-    return _c().release_position(inst_id, filled_sz, pos_id)
 
 
 def status() -> dict:
