@@ -221,7 +221,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 1057.5
+    "width": 1528.5
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -292,7 +292,7 @@
       }
     ]
   },
-  "active": "410bc8847059ce8b",
+  "active": "29274f2588ee77a9",
   "lastOpenFiles": [
     "data/bot_state.db-shm",
     "data/bot_state.db-wal",
