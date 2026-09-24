@@ -47,6 +47,29 @@ def ema(values: Sequence[float], n: int) -> list[float]:
     return out
 
 
+def macd(values: Sequence[float], fast: int = 12, slow: int = 26,
+         signal: int = 9) -> tuple[list[float], list[float], list[float]]:
+    """MACD Аппеля: (линия, сигнальная, гистограмма).
+
+    Линия = EMA(fast) − EMA(slow) — с бара slow-1. Сигнальная — EMA(signal) от линии с
+    затравкой SMA первых signal её значений — с бара slow+signal-2 (33 при 12/26/9).
+    Гистограмма = линия − сигнальная. Раньше — NaN. Затравки SMA, как у ema() и в
+    calc_indicators.py скилла spot-momentum-scan-validate (схема TradingView). Каузальна:
+    out[i] зависит только от values[:i+1]. Потребитель — src/pump_scanner.py (PUMP-CODIFY).
+    """
+    if not 0 < fast < slow or signal <= 0:
+        raise ValueError("0 < fast < slow, signal > 0")
+    fast_e, slow_e = ema(values, fast), ema(values, slow)
+    line = [NAN] * len(values)
+    for i in range(slow - 1, len(values)):
+        line[i] = fast_e[i] - slow_e[i]
+    sig = [NAN] * len(values)
+    if len(values) >= slow:
+        sig[slow - 1:] = ema(line[slow - 1:], signal)
+    hist = [NAN if is_nan(s) else m - s for m, s in zip(line, sig)]
+    return line, sig, hist
+
+
 def _rsi_value(avg_gain: float, avg_loss: float) -> float:
     if avg_loss == 0:
         return 50.0 if avg_gain == 0 else 100.0
