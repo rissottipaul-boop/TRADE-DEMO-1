@@ -1,0 +1,6 @@
+{
+  "name": "鲸鱼追踪者",
+  "version": "1.0",
+  "title": "鲸鱼追踪者",
+  "description": "以\"机构怎么动，我就跟着动\"为核心哲学的永续合约策略 Skill。识别 Order Block 机构挂单区、Fair Value Gap 价格失衡区与流动性扫盘信号，追踪 BTC 市场中鲸鱼的真实意图。当用户说\"鲸鱼追踪\"、\"whale tracker\"、\"聪明钱\"、\"机构跟踪\"、\"SMC策略\"时启用。"
+}

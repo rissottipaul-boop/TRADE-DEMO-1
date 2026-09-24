@@ -1,0 +1,6 @@
+{
+  "name": "resilience-trader",
+  "version": "1.0",
+  "title": "resilience-trader韧性交易者",
+  "description": "韧性交易者 | 一份以\"活下去优先、保护本金、信念先行\"为核心哲学的永续合约策略 Skill。当用户说\"韧性交易\"、\"resilience trader\"、\"保本策略\"、\"信念交易\"时启用。融合双时间框架趋势识别、固定风险仓位法、ATR 熔断与 AI 综合推理,适合不愿在波动中梭哈的稳健型交易者。"
+}

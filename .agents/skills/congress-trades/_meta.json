@@ -1,0 +1,6 @@
+{
+  "name": "congress-trades",
+  "version": "1.0",
+  "title": "congress trades",
+  "description": "实时追踪美国国会议员的股票交易，让「聪明政治钱」无所遁形。\r\n通过 Quiver Quant API 同步议员交易申报数据到本地 SQLite 数据库，支持按政客姓名、股票代码、党派、日期范围与交易类型灵活查询。超过可配置金额阈值（默认 $15,001）的大额交易自动触发预警，生成结构化 Alert 文件供实时监控"
+}

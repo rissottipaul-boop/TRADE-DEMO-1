@@ -1,0 +1,6 @@
+{
+  "name": "okx-execution-vortex",
+  "version": "2.0",
+  "title": "漩涡执行器",
+  "description": "接收交易信号后安全执行现货/永续/交割/期权订单，支持 OCO、网格、DCA、仓位管理及二次确认风控。依赖 market/trade/portfolio/bot 基础 Skill。"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "btc-usdt-swap-defensive-ai",
+  "version": "1.0",
+  "title": "BTC稳健王（btc-usdt-swap-defensive-ai）",
+  "description": "仅交易 BTC-USDT-SWAP 的防守型 AI 永续合约策略 Skill。使用多周期趋势、资金费率、持仓量、波动率与账户风控做综合判断，并通过 Agent Trade Kit 自动执行开平仓与止损，适合谨慎型实盘交易。"
+}

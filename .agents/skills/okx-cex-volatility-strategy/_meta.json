@@ -1,0 +1,6 @@
+{
+  "name": "okx-cex-volatility-strategy",
+  "version": "1.0",
+  "title": "okx-cex-volatility-strategy",
+  "description": "Use this skill when the user wants to start, run, monitor, evaluate, or stop an automated BTC/ETH perpetual swap strategy on OKX based on 1H technical signals and volatility-adaptive risk rules, including requests like 'start volatility strategy', 'run BTC ETH auto strategy', 'auto trade BTC ETH based on indicators', 'volatility adaptive trading', 'multi-indicator confluence strategy', 'strategy status', or 'stop the strategy'. This skill covers 1H data collection, sentiment scoring, AI decision logic, Agent Trade Kit execution, and strategy-level risk control for BTC-USDT-SWAP and ETH-USDT-SWAP. Do NOT use for manual orders (use okx-cex-trade), read-only market data queries (use okx-cex-market), or account-only queries (use okx-cex-portfolio)."
+}

@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OKX 本地复盘</title>
+    <style>
+      :root {
+        --bg: #0f1216;
+        --panel: #161a20;
+        --border: #262b33;
+        --text: #e6e8eb;
+        --muted: #8a93a0;
+        --accent: #4f8cff;
+        --win: #10b981;
+        --loss: #ef4444;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.5 -apple-system, "Segoe UI", sans-serif;
+      }
+      header {
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      header .meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      header form {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      header input,
+      header button {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      header button {
+        cursor: pointer;
+      }
+      main {
+        padding: 16px 24px;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+      }
+      .card .label {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 4px;
+      }
+      .card .value {
+        font-size: 18px;
+        font-weight: 600;
+      }
+      .card .value.pos {
+        color: var(--win);
+      }
+      .card .value.neg {
+        color: var(--loss);
+      }
+      .card .value .unit {
+        font-size: 12px;
+        font-weight: 400;
+        color: var(--muted);
+        margin-left: 4px;
+      }
+
+      /* Leaderboard (收益榜) */
+      .leaderboard-collapse {
+        margin-bottom: 16px;
+      }
+      .leaderboard-collapse > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 8px 12px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-weight: 600;
+        user-select: none;
+      }
+      .leaderboard-collapse > summary::-webkit-details-marker {
+        display: none;
+      }
+      .leaderboard-collapse > summary::before {
+        content: "▼ ";
+        font-size: 10px;
+        color: var(--muted);
+        margin-right: 4px;
+      }
+      .leaderboard-collapse:not([open]) > summary::before {
+        content: "▶ ";
+      }
+      .leaderboard {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      @media (max-width: 900px) {
+        .leaderboard {
+          grid-template-columns: 1fr;
+        }
+      }
+      .lb-col {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+      }
+      .lb-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-weight: 600;
+        font-size: 13px;
+        padding-bottom: 8px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .lb-head-pos {
+        color: var(--win);
+      }
+      .lb-head-neg {
+        color: var(--loss);
+      }
+      .lb-count {
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--muted);
+        background: var(--bg);
+        padding: 2px 8px;
+        border-radius: 10px;
+      }
+      .lb-item {
+        display: block;
+        text-decoration: none;
+        color: inherit;
+        padding: 8px 10px;
+        border-radius: 4px;
+        margin-bottom: 4px;
+        background: var(--bg);
+        border: 1px solid transparent;
+        transition: border-color 0.15s;
+        cursor: pointer;
+      }
+      .lb-item:hover {
+        border-color: var(--border);
+      }
+      .lb-item:last-child {
+        margin-bottom: 0;
+      }
+      .lb-row-1 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 2px;
+      }
+      .lb-sym {
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .lb-pnl {
+        margin-left: auto;
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .lb-pnl.pos {
+        color: var(--win);
+      }
+      .lb-pnl.neg {
+        color: var(--loss);
+      }
+      .lb-row-2 {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .lb-empty {
+        text-align: center;
+        color: var(--muted);
+        font-size: 12px;
+        padding: 16px;
+      }
+      .badge {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 500;
+        border: 1px solid transparent;
+      }
+      .badge.long {
+        color: var(--win);
+        background: rgba(45, 200, 110, 0.12);
+        border-color: rgba(45, 200, 110, 0.3);
+      }
+      .badge.short {
+        color: var(--loss);
+        background: rgba(240, 90, 90, 0.12);
+        border-color: rgba(240, 90, 90, 0.3);
+      }
+
+      .charts {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      @media (max-width: 900px) {
+        .charts {
+          grid-template-columns: 1fr;
+        }
+      }
+      .chart-box {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+      }
+      .chart-box h3 {
+        margin: 0 0 8px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted);
+      }
+
+      .table-wrap {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .table-head {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .table-head input,
+      .table-head select {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+      .scroll {
+        max-height: 70vh;
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th,
+      td {
+        padding: 8px 10px;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 500;
+        cursor: pointer;
+        user-select: none;
+        background: var(--panel);
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+      th:hover {
+        color: var(--text);
+      }
+      th.sort-asc,
+      th.sort-desc {
+        color: var(--text);
+      }
+      th.sort-asc::after {
+        content: " ▴";
+        color: var(--accent);
+      }
+      th.sort-desc::after {
+        content: " ▾";
+        color: var(--accent);
+      }
+      td.pnl-pos {
+        color: var(--win);
+      }
+      td.pnl-neg {
+        color: var(--loss);
+      }
+      tr.row {
+        cursor: pointer;
+      }
+      tr.row:hover td {
+        background: #1a1f27;
+      }
+      tr.row.selected td {
+        background: #1d2733;
+      }
+      .chips {
+        display: inline-flex;
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+      .chip {
+        background: #2a323c;
+        color: var(--text);
+        padding: 1px 7px;
+        border-radius: 10px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .note-mark {
+        color: var(--accent);
+        font-weight: bold;
+        margin-left: 4px;
+      }
+
+      /* Tag stats strip — lives inside .table-wrap above .table-head */
+      .tag-strip {
+        background: var(--panel);
+        padding: 10px 12px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+      }
+      .tag-strip .label {
+        color: var(--muted);
+        font-size: 11px;
+        margin-right: 4px;
+      }
+      .tag-stat {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #2a323c;
+        color: var(--text);
+        padding: 4px 10px;
+        border-radius: 14px;
+        font-size: 11px;
+        cursor: pointer;
+        user-select: none;
+        border: 1px solid transparent;
+        transition: transform 0.08s;
+      }
+      .tag-stat:hover {
+        transform: translateY(-1px);
+      }
+      .tag-stat.drop-over {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.25);
+      }
+      .tag-stat.active {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .tag-stat .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #8a93a0;
+      }
+      .tag-stat .name {
+        font-weight: 500;
+      }
+      .tag-stat .meta {
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .tag-stat .pnl.pos {
+        color: var(--win);
+      }
+      .tag-stat .pnl.neg {
+        color: var(--loss);
+      }
+
+      tr.row[draggable="true"] {
+        cursor: grab;
+      }
+      tr.row.dragging td {
+        opacity: 0.5;
+      }
+      tr.row.drop-row td {
+        background: #1d2f22;
+        box-shadow: inset 2px 0 0 var(--win);
+      }
+      body.tag-dragging tr.row {
+        cursor: copy;
+      }
+      .tag-stat {
+        cursor: grab;
+      }
+      .tag-stat.dragging {
+        opacity: 0.5;
+      }
+
+      .pager {
+        padding: 8px 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .pager button {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 4px 10px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 11px;
+      }
+      .pager button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      /* Right-slide drawer */
+      .drawer {
+        position: fixed;
+        top: 0;
+        right: 0;
+        height: 100vh;
+        width: 440px;
+        background: var(--panel);
+        border-left: 1px solid var(--border);
+        transform: translateX(100%);
+        transition: transform 0.2s ease;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+      }
+      body.drawer-open .drawer {
+        transform: none;
+      }
+      body main {
+        transition: padding-right 0.2s ease;
+      }
+      body.drawer-open main {
+        padding-right: 440px;
+      }
+      .drawer-close {
+        position: absolute;
+        top: 8px;
+        right: 10px;
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 4px 10px;
+        border-radius: 3px;
+        z-index: 1;
+      }
+      .drawer-close:hover {
+        color: var(--text);
+        background: var(--bg);
+      }
+      #detail-panel {
+        padding: 14px;
+        overflow: auto;
+        flex: 1;
+        min-height: 0;
+      }
+      #drawerBackdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.4);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s;
+        z-index: 9;
+      }
+      @media (max-width: 900px) {
+        .drawer {
+          width: 100%;
+        }
+        body.drawer-open main {
+          padding-right: 0;
+        }
+        body.drawer-open #drawerBackdrop {
+          opacity: 1;
+          pointer-events: auto;
+        }
+      }
+      .placeholder {
+        color: var(--muted);
+        text-align: center;
+        padding: 40px 0;
+        font-size: 13px;
+      }
+
+      /* Charts collapse wrapper */
+      .charts-collapse,
+      .tag-summary-collapse {
+        margin-bottom: 16px;
+      }
+      .charts-collapse > summary,
+      .tag-summary-collapse > summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+        padding: 4px 2px 8px;
+        list-style: none;
+        user-select: none;
+      }
+      .charts-collapse > summary::-webkit-details-marker,
+      .tag-summary-collapse > summary::-webkit-details-marker {
+        display: none;
+      }
+      .charts-collapse > summary::before,
+      .tag-summary-collapse > summary::before {
+        content: "▾ ";
+      }
+      .charts-collapse:not([open]) > summary::before,
+      .tag-summary-collapse:not([open]) > summary::before {
+        content: "▸ ";
+      }
+      .charts-collapse .charts {
+        margin-bottom: 0;
+      }
+
+      /* Tag summary table */
+      .tag-summary-wrap {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .tag-summary-wrap .empty {
+        padding: 20px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      table.tag-summary {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      table.tag-summary th,
+      table.tag-summary td {
+        padding: 8px 12px;
+        text-align: right;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      table.tag-summary th {
+        color: var(--muted);
+        font-weight: 500;
+        cursor: pointer;
+        user-select: none;
+        background: var(--panel);
+        position: static;
+        font-size: 11px;
+      }
+      table.tag-summary th:hover {
+        color: var(--text);
+      }
+      table.tag-summary th.sort-asc,
+      table.tag-summary th.sort-desc {
+        color: var(--text);
+      }
+      table.tag-summary th.sort-asc::after {
+        content: " ▴";
+        color: var(--accent);
+      }
+      table.tag-summary th.sort-desc::after {
+        content: " ▾";
+        color: var(--accent);
+      }
+      table.tag-summary th:first-child,
+      table.tag-summary td:first-child,
+      table.tag-summary th:nth-child(2),
+      table.tag-summary td:nth-child(2) {
+        text-align: left;
+      }
+      table.tag-summary tr.ts-row {
+        cursor: pointer;
+      }
+      table.tag-summary tr.ts-row:hover td {
+        background: #1a1f27;
+      }
+      table.tag-summary tr.ts-row.selected td {
+        background: #1d2733;
+      }
+      table.tag-summary tr.ts-row:last-child td {
+        border-bottom: none;
+      }
+      .ts-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #8a93a0;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+      .ts-share-bar {
+        display: inline-block;
+        width: 40px;
+        height: 3px;
+        background: #262b33;
+        border-radius: 2px;
+        margin-left: 6px;
+        vertical-align: middle;
+        overflow: hidden;
+      }
+      .ts-share-bar > span {
+        display: block;
+        height: 100%;
+        background: var(--accent);
+      }
+      .ts-actions {
+        display: inline-flex;
+        gap: 4px;
+      }
+      .ts-actions button {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 3px;
+        cursor: pointer;
+        line-height: 1.3;
+      }
+      .ts-actions button:hover {
+        color: var(--text);
+        border-color: var(--muted);
+      }
+      .ts-actions button.danger:hover {
+        color: var(--loss);
+        border-color: var(--loss);
+      }
+      .ts-edit-name {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        padding: 2px 6px;
+        font-size: 12px;
+        font-family: inherit;
+        width: 110px;
+      }
+      .ts-edit-color {
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: 1px solid var(--border);
+        background: transparent;
+        border-radius: 3px;
+        cursor: pointer;
+        vertical-align: middle;
+      }
+      .ts-new-tag {
+        padding: 10px 12px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .ts-new-tag input[type="text"] {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 4px 8px;
+        font-size: 12px;
+        font-family: inherit;
+        width: 160px;
+      }
+      .ts-new-tag input[type="color"] {
+        width: 28px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid var(--border);
+        background: transparent;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      .ts-new-tag button {
+        background: var(--accent);
+        color: white;
+        border: none;
+        padding: 4px 12px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .ts-new-tag .hint {
+        color: var(--muted);
+        font-size: 11px;
+        margin-left: auto;
+      }
+
+      /* detail.html styles */
+      .detail h2 {
+        margin: 0 0 4px;
+        font-size: 15px;
+      }
+      .detail .sub {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 12px;
+      }
+      .detail dl {
+        display: grid;
+        grid-template-columns: 90px 1fr;
+        gap: 4px 10px;
+        margin: 0 0 12px;
+        font-size: 12px;
+      }
+      .detail dt {
+        color: var(--muted);
+      }
+      .detail dd {
+        margin: 0;
+        font-variant-numeric: tabular-nums;
+      }
+      .detail .section {
+        border-top: 1px solid var(--border);
+        padding-top: 10px;
+        margin-top: 10px;
+      }
+      .detail .section h4 {
+        margin: 0 0 8px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted);
+      }
+      .detail .tag-row {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .detail .tag-row .chip button {
+        background: none;
+        border: none;
+        color: var(--muted);
+        cursor: pointer;
+        padding: 0 0 0 4px;
+        font-size: 11px;
+      }
+      .detail .tag-row .chip button:hover {
+        color: var(--loss);
+      }
+      .detail form.add-tag,
+      .detail form.refl {
+        display: flex;
+        gap: 6px;
+        align-items: flex-start;
+      }
+      .detail form input,
+      .detail form textarea {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 5px 8px;
+        font-size: 12px;
+        font-family: inherit;
+      }
+      .detail form input {
+        flex: 1;
+      }
+      .detail form textarea {
+        flex: 1;
+        min-height: 80px;
+        resize: vertical;
+      }
+      .detail form button {
+        background: var(--accent);
+        color: white;
+        border: none;
+        padding: 5px 12px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .detail .refl-meta {
+        color: var(--muted);
+        font-size: 10px;
+        margin-top: 4px;
+      }
+      .detail details.raw summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .detail pre {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 8px;
+        font-size: 10px;
+        overflow-x: auto;
+        max-height: 240px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>OKX 本地复盘</h1>
+        <div class="meta">
+          共 {{ summary.count }} 个头寸 · 生成于 {{
+          generated_at[:19].replace("T"," ") }}
+        </div>
+      </div>
+      <form method="get" action="/">
+        <input type="date" name="since" value="{{ filter_since }}" />
+        <span style="color: var(--muted)">~</span>
+        <input type="date" name="until" value="{{ filter_until }}" />
+        <button type="submit">筛选</button>
+        {% if filter_since or filter_until %}
+        <a
+          href="/"
+          style="color: var(--muted); font-size: 11px; margin-left: 4px"
+          >清除</a
+        >
+        {% endif %}
+      </form>
+    </header>
+
+    <main>
+      {% if summary.count == 0 %}
+      <div
+        class="placeholder"
+        style="
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          padding: 60px;
+        "
+      >
+        没有数据。先让 OKX 官方 skill 拉一份 positions-history JSON，再跑
+        <code>okx_review ingest --positions &lt;file&gt;</code>。
+      </div>
+      {% else %}
+
+      <section class="cards">
+        <div class="card">
+          <div class="label">总盈亏</div>
+          <div class="value {{ 'pos' if summary.total_pnl >= 0 else 'neg' }}">
+            {{ "%+.2f"|format(summary.total_pnl) }}
+          </div>
+        </div>
+        <div class="card">
+          <div class="label">胜率</div>
+          <div class="value">{{ "%.1f%%"|format(summary.win_rate * 100) }}</div>
+        </div>
+        <div class="card">
+          <div class="label" title="盈利总额 ÷ 亏损总额绝对值，>1 表示整体赚钱">盈亏比</div>
+          <div class="value">
+            {% if summary.profit_factor is none %}∞{% else %}{{ "%.2f"|format(summary.profit_factor) }}{% endif %}
+          </div>
+        </div>
+        <div class="card">
+          <div class="label">交易数</div>
+          <div class="value">{{ summary.count }}</div>
+        </div>
+        <div class="card">
+          <div class="label" title="按时间跨度平均">交易频率</div>
+          <div class="value">{{ "%.1f"|format(summary.trades_per_week) }}<span class="unit">次/周</span></div>
+        </div>
+        <div class="card">
+          <div class="label" title="已打标签的交易 / 总交易数">标签覆盖</div>
+          <div class="value">
+            {{ summary.tagged_count }}<span class="unit">/ {{ summary.count }}</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="label">总手续费</div>
+          <div class="value neg">{{ "%.2f"|format(summary.total_fee) }}</div>
+        </div>
+      </section>
+
+      <details class="charts-collapse" id="chartsCollapse" open>
+        <summary>图表总览</summary>
+        <section class="charts">
+          <div class="chart-box">
+            <h3>累计盈亏曲线</h3>
+            <canvas id="cumChart" height="90"></canvas>
+          </div>
+          <div class="chart-box">
+            <h3>按月盈亏</h3>
+            <canvas id="monthChart" height="90"></canvas>
+          </div>
+        </section>
+      </details>
+
+      <details class="leaderboard-collapse" id="leaderboardCollapse" open>
+        <summary>收益榜 · Top {{ leaderboard.winners|length }} / Top {{ leaderboard.losers|length }}</summary>
+        <div class="leaderboard">
+          <div class="lb-col">
+            <div class="lb-head lb-head-pos">
+              <span>盈利榜</span>
+              <span class="lb-count">{{ leaderboard.winners|length }}</span>
+            </div>
+            {% if leaderboard.winners %}
+              {% for p in leaderboard.winners %}
+              <a class="lb-item" href="/positions/{{ p.id }}" hx-get="/positions/{{ p.id }}" hx-target="#detail-panel" hx-swap="innerHTML">
+                <div class="lb-row-1">
+                  <span class="lb-sym">{{ p.symbol }}</span>
+                  <span class="badge {{ 'long' if p.direction == 'long' else 'short' }}">{{ '多头' if p.direction == 'long' else '空头' }}</span>
+                  <span class="lb-pnl pos">{{ "%+.2f"|format(p.realized_pnl) }}</span>
+                </div>
+                <div class="lb-row-2">
+                  <span class="lb-type">{{ p.inst_type or '-' }}</span>
+                  <span class="lb-time">{{ p.closed_at[:19]|replace('T', ' ') }}</span>
+                </div>
+              </a>
+              {% endfor %}
+            {% else %}
+              <div class="lb-empty">还没有盈利交易</div>
+            {% endif %}
+          </div>
+          <div class="lb-col">
+            <div class="lb-head lb-head-neg">
+              <span>亏损榜</span>
+              <span class="lb-count">{{ leaderboard.losers|length }}</span>
+            </div>
+            {% if leaderboard.losers %}
+              {% for p in leaderboard.losers %}
+              <a class="lb-item" href="/positions/{{ p.id }}" hx-get="/positions/{{ p.id }}" hx-target="#detail-panel" hx-swap="innerHTML">
+                <div class="lb-row-1">
+                  <span class="lb-sym">{{ p.symbol }}</span>
+                  <span class="badge {{ 'long' if p.direction == 'long' else 'short' }}">{{ '多头' if p.direction == 'long' else '空头' }}</span>
+                  <span class="lb-pnl neg">{{ "%+.2f"|format(p.realized_pnl) }}</span>
+                </div>
+                <div class="lb-row-2">
+                  <span class="lb-type">{{ p.inst_type or '-' }}</span>
+                  <span class="lb-time">{{ p.closed_at[:19]|replace('T', ' ') }}</span>
+                </div>
+              </a>
+              {% endfor %}
+            {% else %}
+              <div class="lb-empty">还没有亏损交易</div>
+            {% endif %}
+          </div>
+        </div>
+      </details>
+
+      <details class="tag-summary-collapse" id="tagSummaryCollapse" open>
+        <summary>标签表现汇总（点击行 = 按标签筛选）</summary>
+        <div class="tag-summary-wrap">
+          <table class="tag-summary">
+            <thead>
+              <tr>
+                <th data-skey="rank" style="width: 36px">#</th>
+                <th data-skey="name">标签</th>
+                <th data-skey="count">笔数</th>
+                <th data-skey="share" title="占已打标签交易的比例">占比</th>
+                <th data-skey="winRate">胜率</th>
+                <th data-skey="pnl">总盈亏</th>
+                <th data-skey="avgPnl">均盈亏</th>
+                <th data-skey="plRatio" title="均盈利 ÷ 均亏损的绝对值">
+                  盈亏比
+                </th>
+                <th data-skey="fee">手续费</th>
+                <th style="width: 80px; cursor: default">操作</th>
+              </tr>
+            </thead>
+            <tbody id="tagSummaryBody"></tbody>
+          </table>
+          <div class="empty" id="tagSummaryEmpty" style="display: none">
+            还没有标签。在下方新建一个，或从交易详情里输入新标签名。
+          </div>
+          <form class="ts-new-tag" id="tsNewTagForm">
+            <input
+              type="text"
+              id="tsNewTagName"
+              placeholder="新标签名"
+              maxlength="32"
+            />
+            <input
+              type="color"
+              id="tsNewTagColor"
+              value="#4f8cff"
+              title="标签颜色"
+            />
+            <button type="submit">+ 新建标签</button>
+            <span class="hint">新建后可在顶部 chip 拖到交易上</span>
+          </form>
+        </div>
+      </details>
+
+      <section class="table-wrap">
+        <section class="tag-strip" id="tagStrip">
+          <span class="label">标签（点击筛选 · 双向拖拽打标签：行↔标签）</span>
+        </section>
+        <div class="table-head">
+          <input id="filterSymbol" placeholder="筛选 symbol" />
+          <select id="filterDir">
+            <option value="">所有方向</option>
+            <option value="long">仅 long</option>
+            <option value="short">仅 short</option>
+          </select>
+          <select id="filterPnl">
+            <option value="">所有</option>
+            <option value="win">盈利</option>
+            <option value="loss">亏损</option>
+          </select>
+          <select id="filterTag">
+            <option value="">所有标签</option>
+            <option value="__has__">有标签</option>
+            <option value="__none__">无标签</option>
+          </select>
+          <select id="filterNote">
+            <option value="">复盘笔记</option>
+            <option value="__has__">有复盘</option>
+            <option value="__none__">无复盘</option>
+          </select>
+          <span
+            id="tableCount"
+            style="margin-left: auto; color: var(--muted)"
+          ></span>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th data-key="closed_at">平仓</th>
+                <th data-key="symbol">Symbol</th>
+                <th data-key="direction">方向</th>
+                <th data-key="notional_usd" title="名义本金 · 杠杆">本金</th>
+                <th data-key="realized_pnl">盈亏</th>
+                <th data-key="total_fee">手续费</th>
+                <th>标签</th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <div>
+            每页
+            <select id="pageSize">
+              <option>50</option>
+              <option>100</option>
+              <option>200</option>
+            </select>
+          </div>
+          <div>
+            <button id="prev">上一页</button><span id="pageInfo"></span
+            ><button id="next">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="drawer" id="detailDrawer">
+        <button
+          class="drawer-close"
+          type="button"
+          aria-label="关闭"
+          title="关闭 (Esc)"
+        >
+          ×
+        </button>
+        <div id="detail-panel">
+          <div class="placeholder">点击头寸查看详情、打标签、写复盘笔记</div>
+        </div>
+      </aside>
+      <div id="drawerBackdrop"></div>
+
+      <div
+        id="bootstrap"
+        data-positions='{{ positions | tojson }}'
+        data-all-tags='{{ all_tags | tojson }}'
+        hidden
+      ></div>
+      {{ script_tag|safe }}
+      {% endif %}
+    </main>
+  </body>
+</html>

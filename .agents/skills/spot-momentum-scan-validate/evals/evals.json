@@ -1,0 +1,39 @@
+{
+  "skill_name": "spot-momentum-scan-validate",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我扫描一下现货市场有没有量价共振信号，先别下单，用1小时K线，量比大于1.5，涨幅超过1%",
+      "expected_output": "执行阶段一：扫描 OKX 现货 USDT 市场（1H K线），计算 MA20/MACD/RSI/量比，输出信号报告和未触发币对摘要，不查询账户余额，不执行任何下单操作，CSV status=SCAN_ONLY",
+      "must_not_contain": ["spot_place_order", "account_get_balance", "spot_place_algo_order"],
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "上面扫描结果里 SOL 和 ETH 信号不错，帮我只买这两个，confirm_trade=true，每笔 5% 仓位",
+      "expected_output": "重新扫描确认 SOL-USDT 和 ETH-USDT 信号仍有效，展示二次确认提示（列明币对、预计金额、止损止盈参数），等待用户回复"确认执行"后才调用 spot_place_order",
+      "must_contain": ["确认执行", "confirm_trade: true"],
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "确认执行",
+      "context": "用户已在上一轮看到确认提示，现在回复确认",
+      "expected_output": "对 SOL-USDT 和 ETH-USDT 调用 spot_place_order（市价买入），轮询至 filled，挂固定止损单（slTriggerPx = fill_price × 0.98，slOrdPx=-1），挂移动止盈单（activePx = fill_price × 1.02，callbackRatio=0.02），写入 CSV（status=FILLED，confirm_trade=true），输出成交摘要",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "扫描 BTC-USDT、ETH-USDT、SOL-USDT 这三个币对，用4小时K线，量比要大于2，涨幅超过3%，结果存到 ~/scan_results.csv",
+      "expected_output": "只扫描指定3个币对，4H K线，量比>2 涨幅>3%，输出每个币对的全量指标和条件状态（含未触发原因），追加写入 ~/scan_results.csv，不下单",
+      "must_not_contain": ["spot_place_order", "confirm_trade=true"],
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "量比和涨幅条件都OK，但我想把止损改成3%、移动止盈激活门槛改成3%、回撤改成1.5%，然后confirm_trade=true，帮我买",
+      "expected_output": "使用 stop_loss_pct=3.0、trailing_activate_pct=3.0、trailing_pct=1.5 重新扫描，展示调整后的止损止盈参数确认提示，等待用户回复"确认执行"后执行下单，slTriggerPx = fill_price × 0.97，activePx = fill_price × 1.03，callbackRatio=0.015",
+      "files": []
+    }
+  ]
+}

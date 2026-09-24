@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "max_continuations": 15,
+  "note": "Автопилот оркестратора (ops/hooks/autopilot.py): пока на ops/board.md есть готовые задачи, Stop-хук не даёт агенту завершить ход — не больше max_continuations раз за сессию. enabled=false выключает автопилот. Меняет только человек."
+}

@@ -1,0 +1,18 @@
+{
+  "example": true,
+  "pocket": "live-main",
+  "mode": "live",
+  "budget_usdt": 1000,
+  "require_ip_whitelist": false,
+  "sleeves": {
+    "dca": {
+      "enabled": true,
+      "inst_id": "BTC/USDT",
+      "quote_per_buy_usdt": 10,
+      "interval_hours": 24,
+      "max_total_usdt": 150
+    }
+  },
+  "updated_at": "2026-09-24T12:00:00+05:00",
+  "note": "ШАБЛОН (insights/business-plan.md §5). Скопируйте в ops/live-pocket.json, удалите строку \"example\": true и поставьте свои числа. budget_usdt = сумма, переведённая в суб-аккаунт; сумма max_total_usdt рукавов <= budget_usdt. Меняет только человек."
+}

@@ -1,0 +1,6 @@
+{
+  "name": "hyperliquid-analyzer",
+  "version": "1.0",
+  "title": "Hyperliquid 分析",
+  "description": "分析 Hyperliquid 市场数据，提供交易洞察，覆盖六大分析模式：成交流巨鲸捕捉，链上巨鲸持仓自动监控推送、挂单墙扫描，链上持仓分析，HL和OKX资金费情绪分析和链上链下价差扫描。用链上信号，辅助你的CEX交易"
+}

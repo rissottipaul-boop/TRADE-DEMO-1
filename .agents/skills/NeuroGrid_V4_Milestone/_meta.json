@@ -1,0 +1,6 @@
+{
+  "name": "NeuroGrid_V4_Milestone",
+  "version": "1.0",
+  "title": "NeuroGrid_V3：多维动量突破与复利引擎",
+  "description": "本策略专为 OKX AI 交易大赛定制，融合技术面（多级别 SuperTrend+MACD）、资金面（资金费率极值）与情绪面（持仓量异动）。采用动态波动率扫描锁定最强标的，结合 ATR 动态止损与 N-Bar 追踪止盈，并在高确定性单边行情中激活独特的“复利加仓”协议，实现盈亏比最大化。本金基准：$1890。"
+}

@@ -1,0 +1,72 @@
+{% set pnl_cls = 'pos' if (p.realized_pnl or 0) >= 0 else 'neg' %}
+<div class="detail">
+  <h2>
+    {{ p.symbol }}
+    <span style="color: var(--{{ 'win' if pnl_cls == 'pos' else 'loss' }}); font-size: 13px; font-weight: normal;">
+      {{ "%+.2f"|format(p.realized_pnl or 0) }}
+    </span>
+  </h2>
+  <div class="sub">#{{ p.id }} · posId {{ p.okx_position_id }}</div>
+
+  <dl>
+    <dt>方向</dt><dd>{{ p.direction }}{% if p.inst_type %} · {{ p.inst_type }}{% endif %}</dd>
+    <dt>规模</dt><dd>{{ "%.4f"|format(p.size) if p.size is not none else '-' }}{% if p.inst_type in ['SWAP','FUTURES','OPTION'] %} 张{% endif %}</dd>
+    <dt>名义本金</dt><dd>{% if p.notional_usd %}{{ "{:,.2f}".format(p.notional_usd) }} USD{% else %}-{% endif %}</dd>
+    <dt>杠杆</dt><dd>{{ p.leverage }}x · {{ p.margin_mode }}</dd>
+    <dt>开仓均价</dt><dd>{{ "%.4f"|format(p.entry_price_avg) if p.entry_price_avg is not none else '-' }}</dd>
+    <dt>平仓均价</dt><dd>{{ "%.4f"|format(p.exit_price_avg) if p.exit_price_avg is not none else '-' }}</dd>
+    <dt>开仓时间</dt><dd>{{ p.opened_at[:19].replace("T"," ") if p.opened_at else '-' }}</dd>
+    <dt>平仓时间</dt><dd>{{ p.closed_at[:19].replace("T"," ") }}</dd>
+    <dt>手续费</dt><dd>{{ "%.4f"|format(p.total_fee or 0) }}</dd>
+  </dl>
+
+  <div class="section">
+    <h4>标签</h4>
+    <div class="tag-row">
+      {% for t in p.tags %}
+        <span class="chip" data-color="{{ t.color or '' }}"
+          {% if t.color %}style="background: {{ t.color }}"{% endif %}>
+          {{ t.name }}
+          <button title="移除"
+            hx-delete="/positions/{{ p.id }}/tags/{{ t.id }}"
+            hx-target="closest .detail" hx-swap="outerHTML">×</button>
+        </span>
+      {% else %}
+        <span style="color: var(--muted); font-size: 11px;">（暂无）</span>
+      {% endfor %}
+    </div>
+    <form class="add-tag"
+      hx-post="/positions/{{ p.id }}/tags"
+      hx-target="closest .detail" hx-swap="outerHTML"
+      hx-on::after-request="this.reset()">
+      <input name="name" placeholder="标签名（直接回车添加）"
+        list="tag-suggestions" autocomplete="off" required />
+      <button type="submit">+</button>
+      <datalist id="tag-suggestions">
+        {% for t in p.all_tags %}<option value="{{ t.name }}">{% endfor %}
+      </datalist>
+    </form>
+  </div>
+
+  <div class="section">
+    <h4>复盘笔记</h4>
+    <form class="refl"
+      hx-post="/positions/{{ p.id }}/reflection"
+      hx-target="closest .detail" hx-swap="outerHTML">
+      <textarea name="content" placeholder="这笔的入场理由 / 出场原因 / 下次该怎样？留空保存则删除。">{{ p.reflection.content if p.reflection else '' }}</textarea>
+      <button type="submit">保存</button>
+    </form>
+    {% if p.reflection %}
+      <div class="refl-meta">
+        更新于 {{ p.reflection.updated_at[:19].replace("T"," ") }}
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="section">
+    <details class="raw">
+      <summary>原始 OKX payload</summary>
+      <pre>{{ p.raw_pretty }}</pre>
+    </details>
+  </div>
+</div>

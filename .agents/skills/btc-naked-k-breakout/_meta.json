@@ -1,0 +1,6 @@
+{
+  "name": "btc-naked-k-breakout",
+  "version": "1.0",
+  "title": "btc-naked-k-breakout",
+  "description": "BTC裸K结构AI突破策略。每5分钟触发，基于300根K线识别结构点、构建箱体、评估结构质量，通过AI综合判断执行突破回踩交易，支持动态仓位和高级持仓管理。"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "okx-600u-pnl-percent-v1",
+  "version": "1.0",
+  "title": "okx-600u-pnl-percent-v1",
+  "description": "Yield-focused OKX Agent Trade Kit strategy for a 600 USDT account, trading only BTC and ETH USDT perpetuals with single-position risk control, strict stop loss, and skip-first execution logic."
+}

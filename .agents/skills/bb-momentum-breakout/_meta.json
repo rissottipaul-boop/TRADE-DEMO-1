@@ -1,0 +1,6 @@
+{
+  "name": "bb-momentum-breakout",
+  "version": "1.0",
+  "title": "bb-momentum-breakout",
+  "description": "布林带收缩突破 + MACD 确认的动量交易 Skill。当用户说'布林突破'、'动量突破'、'BB突破'、'启动突破策略'时使用此技能。自动检测布林带收缩后的方向性突破，结合 MACD 信号和 ATR 动态止损，快进快出捕捉动量行情。"
+}

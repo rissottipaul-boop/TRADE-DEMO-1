@@ -1,0 +1,23 @@
+# Secrets — никогда не коммитить
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Данные и состояние бота
+data/
+*.sqlite3
+*.db
+logs/
+
+# IDE
+.vscode/
+.idea/

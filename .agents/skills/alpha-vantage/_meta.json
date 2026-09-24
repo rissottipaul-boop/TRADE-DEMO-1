@@ -1,0 +1,6 @@
+{
+  "name": "alpha-vantage",
+  "version": "3.0",
+  "title": "alpha 宏观分析",
+  "description": "跨资产分析是其独特优势——可同时拉取标普 500、黄金、美元指数、美联储利率、CPI、GDP 等宏观数据，一张表看清「今天 BTC 是在跟风险资产走，还是在独立定价」。\r\n与 OKX Trade Kit 联动，Alpha Vantage 负责深度历史与宏观经济背景，OKX 提供实时价格、资金费率与盘口，两者互补形成完整分析链路"
+}

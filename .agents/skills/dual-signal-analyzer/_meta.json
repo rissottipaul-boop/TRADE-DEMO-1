@@ -1,0 +1,6 @@
+{
+  "name": "dual-signal-analyzer",
+  "version": "1.0",
+  "title": "双信号分析器",
+  "description": "基于RSI和MACD双指标交叉验证的交易信号分析Skill，提供智能买卖信号和风险管理建议"
+}

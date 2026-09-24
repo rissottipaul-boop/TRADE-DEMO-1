@@ -1,0 +1,6 @@
+{
+  "name": "rsi-bottom-hunter",
+  "version": "1.0",
+  "title": "RSI抄底宝",
+  "description": "RSI抄底策略交易 Skill。当用户说'RSI抄底'、'超卖买入'、'RSI策略'、'抄底宝'、'启动RSI交易'时使用此技能。自动监控RSI指标，在超卖区域买入，并执行止盈止损。依赖 okx-cex-market、okx-cex-trade、okx-cex-portfolio 三个 Skill。"
+}

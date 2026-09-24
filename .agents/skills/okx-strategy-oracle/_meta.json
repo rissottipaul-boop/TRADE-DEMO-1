@@ -1,0 +1,6 @@
+{
+  "name": "okx-strategy-oracle",
+  "version": "1.0",
+  "title": "神谕策略师",
+  "description": "基于实时行情+指标+链上数据生成交易策略，提供三档风险方案、参数优化及 bot 配置，支持一键转执行。依赖 market/portfolio。"
+}

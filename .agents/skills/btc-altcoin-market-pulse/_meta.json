@@ -1,0 +1,6 @@
+{
+  "name": "btc-altcoin-market-pulse",
+  "version": "1.0",
+  "title": "btc-altcoin-market-pulse",
+  "description": "Fetches live OKX market data across Bitcoin and major altcoins, analyzes price momentum, funding rates, open interest, and BTC dominance signals to produce a structured BTC + Altcoin Market Pulse report."
+}

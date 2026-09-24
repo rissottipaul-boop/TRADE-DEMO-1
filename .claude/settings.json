@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".venv/Scripts/python.exe ops/hooks/guard.py",
+            "windows": ".venv\\Scripts\\python.exe ops\\hooks\\guard.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".venv/Scripts/python.exe ops/hooks/autopilot.py",
+            "windows": ".venv\\Scripts\\python.exe ops\\hooks\\autopilot.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

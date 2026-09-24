@@ -1,0 +1,5 @@
+{
+  "live_enabled": true,
+  "enabled_until": "2026-10-01T12:00:00+05:00",
+  "note": "Окно live-торговли. Live-процессы проекта (src.live_preflight, src.live_runner) торгуют только при live_enabled=true и enabled_until в будущем; без enabled_until окно считается закрытым. С 2026-09-24 07:57 guard окно не проверяет (AGENTS.md §2) — его соблюдает код. По плану insights/business-plan.md: окно не длиннее 7 дней, продление — после еженедельного разбора LIVE-REVIEW (§6)."
+}

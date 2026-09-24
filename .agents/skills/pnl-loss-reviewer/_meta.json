@@ -1,0 +1,6 @@
+{
+  "name": "pnl-loss-reviewer",
+  "version": "1.0",
+  "title": "盈亏复盘图表版",
+  "description": "盈亏复盘图表版 Skill。当用户说'复盘'、'亏损分析'、'盈亏报告'、'为什么亏了'、'交易总结'、'回顾交易'、'盈亏图表'、'复盘报告'时使用此技能。自动拉取历史交易记录，分析亏损原因，生成可视化图表和复盘报告。依赖 okx-cex-market、okx-cex-trade、okx-cex-portfolio 三个 Skill。"
+}

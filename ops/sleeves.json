@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "updated_at": "2026-09-24T10:30:00+05:00",
+  "note": "Правила атрибуции PnL по рукавам для src/pnl_ledger.py (задача PNL-LEDGER, методика — insights/pnl-ledger.md). Не guard-периметр: правят агенты. Порядок: ордер нативного бота (ordId из sub-orders) -> bots[algoId] -> bot_algo_cl_ord_id_prefixes[префикс algoClOrdId]; иначе владелец по префиксу clOrdId (самый длинный; коды — реестр src/order_owner.py, ORDER-OWNER-TAG); иначе tags; иначе default_sleeve. Таблицы cl_ord_id_prefixes и tags: '*' — для всех режимов, 'demo'/'live' перекрывают общие.",
+  "default_sleeve": "manual",
+  "earn_sleeve": "cash_earn",
+  "sleeves": {
+    "cash_earn": {"title": "Кэш (+Earn)", "plan": true, "note": "business-plan.md §2.1; доход — проценты Simple Earn (finance/savings/lending-history)"},
+    "dca": {"title": "DCA BTC/ETH", "plan": true, "note": "live: src.live_runner (botldca, до ORDER-OWNER-TAG — bot/botr); demo: src.dca_bot (botsdca)"},
+    "native_grid": {"title": "Нативный grid", "plan": true, "note": "нативные grid-боты OKX; в live — только через src/native_grid.py (NATIVE-GRID-WRAP)"},
+    "funding_carry": {"title": "Funding carry", "plan": true, "note": "funding fee SWAP (bills type 8) — по умолчанию сюда"},
+    "signal": {"title": "Сигнальная (MR/trend)", "plan": true, "note": "префикс владельца появится с MEANREV-IMPL / TREND-DESIGN"},
+    "pump": {"title": "Памп", "plan": true, "note": "Pump Risk Taker (pmp), пока только demo"},
+    "demo_fleet": {"title": "Демо-флот ботов", "plan": false, "note": "FLEET-DEMO/FLEET-EXPAND, algoClOrdId flt* (insights/bot-fleet-demo.md)"},
+    "engine": {"title": "Движок / OrderRouter", "plan": false, "note": "clOrdId bot/botr без рукава; в live bot/botr ставит только live_runner — это рукав dca"},
+    "tests": {"title": "Тесты и замеры", "plan": false, "note": "lt/rt/smk/wsd, тестовые боты tst*, замеры DEMO-SLIPPAGE через CCXT без clOrdId"},
+    "agent_cli": {"title": "Агенты через okx CLI", "plan": false, "note": "OKX Trader (trd), Ops Sentinel (sen), ордера CLI без префикса владельца (tag CLI)"},
+    "manual": {"title": "Прочее / ручное", "plan": false, "note": "ордера человека без меток и всё неопознанное — не выбрасывается"}
+  },
+  "bots": {
+    "3949248990629228544": {"sleeve": "native_grid", "note": "BTC-USDT spot grid, эталон GRID-VERDICT (insights/grid-bot-demo-run.md)"}
+  },
+  "bot_algo_cl_ord_id_prefixes": {
+    "flt": "demo_fleet",
+    "tst": "tests"
+  },
+  "cl_ord_id_prefixes": {
+    "*": {
+      "bot": "engine",
+      "botr": "engine",
+      "botsdca": "dca",
+      "bottdca": "tests",
+      "botldca": "dca",
+      "lt": "tests",
+      "rt": "tests",
+      "smk": "tests",
+      "wsd": "tests",
+      "trd": "agent_cli",
+      "pmp": "pump",
+      "sen": "agent_cli",
+      "iex": "tests",
+      "hnt": "tests",
+      "usr": "manual"
+    },
+    "demo": {
+      "6b9ad766b55dBCDE": "tests"
+    },
+    "live": {
+      "bot": "dca",
+      "botr": "dca"
+    }
+  },
+  "tags": {
+    "*": {},
+    "demo": {
+      "CLI": "agent_cli",
+      "MCP": "agent_cli",
+      "6b9ad766b55dBCDE": "tests"
+    },
+    "live": {}
+  },
+  "funding": {
+    "default_sleeve": "funding_carry",
+    "by_inst": {}
+  }
+}

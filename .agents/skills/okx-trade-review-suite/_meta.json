@@ -1,0 +1,6 @@
+{
+  "name": "okx-trade-review-suite",
+  "version": "1.0",
+  "title": "交易复盘全家桶 · Pro",
+  "description": "一个 Skill 集成 8 大复盘维度：盈亏归因拆解、权益曲线回放、最大回撤体检、连胜连亏期望值、vs Buy&Hold/SMA/DCA 的 alpha 计量、追高/割肉/报复交易行为指纹、手续费与 maker-taker 审计、持仓时长 × PnL 相关性，以及日/周/月自动聚合报告。只读，不下单，不转账。适用场景：复盘我的交易、我哪里做错了、我比躺平多赚多少、一键周报、我是不是总追高、手续费吃了多少、最大回撤多少、哪个币最赚钱、review my trades、trading review、performance check、是不是该转定投、我的策略还能不能继续、下月怎么改进、trade audit、psychology check、alpha analysis、drawdown review、fee audit、win rate analysis。关键词：复盘、review、归因、attribution、权益曲线、equity curve、MDD、最大回撤、连胜连亏、streak、胜率、期望值、凯利、Kelly、alpha、Sharpe、Sortino、IR、benchmark、追高、割肉、报复交易、FOMO、死扛、behavior、手续费、fees、maker、taker、持仓时长、hold duration、日报、周报、月报、digest、digest summary。"
+}

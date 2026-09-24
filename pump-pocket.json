@@ -1,0 +1,17 @@
+{
+  "pocket": "pump-risk-pocket",
+  "mode": "demo",
+  "budget_pct_of_equity": 0.10,
+  "equity_total_usdt": 103629.11,
+  "budget_usdt": 10362.91,
+  "daily_loss_limit": 518.15,
+  "max_drawdown": 3108.87,
+  "max_risk_per_trade": 103.63,
+  "max_position_pct": 1036.29,
+  "leverage": "spot only",
+  "max_open_positions": 3,
+  "stop_loss_range": [1.5, 2.5],
+  "created_at": "2026-09-24T02:17:14+05:00",
+  "updated_at": "2026-09-24T07:25:00+05:00",
+  "decision_note": "PUMP-BUDGET: человек выбрал 10% эквити (переопределяет рекомендацию исследования 5%). Лимиты пересчитаны от текущей эквити на момент решения, внутренние доли сохранены: дневной лимит 5%/просадка 30%/риск на сделку 1%/макс. позиция 10% от budget_usdt."
+}

@@ -1,0 +1,6 @@
+{
+  "name": "spot-momentum-scan-validate",
+  "version": "1.0",
+  "title": "spot-momentum-scan-validate",
+  "description": "量价共振两阶段验证策略。第一阶段\"只扫描不下单\"，输出信号报告供人工确认； 第二阶段\"确认下单\"，用户明确传入 confirm_trade=true 后才执行实际交易。 当用户提到\"先扫描再下单\"、\"验证信号\"、\"确认后交易\"、\"两阶段交易\"、 \"信号验证\"、\"先看信号\"时，必须使用本 skill。"
+}

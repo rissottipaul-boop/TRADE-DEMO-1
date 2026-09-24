@@ -1,0 +1,40 @@
+{
+  "schema_version": "2.0",
+  "parameters": {
+    "entry_price": 83882.3,
+    "account_size": 1000.0,
+    "side": "short",
+    "inst_type": "swap",
+    "leverage": 1,
+    "contract_value": 0.01,
+    "risk_pct": 1.0,
+    "stop_price": 88076.4
+  },
+  "side": "short",
+  "inst_type": "swap",
+  "leverage": 1,
+  "inst_id": "BTC-USDT-SWAP",
+  "mode": "contracts",
+  "calculations": {
+    "fixed_fractional": {
+      "method": "fixed_fractional",
+      "quantity": 0,
+      "unit_label": "contracts",
+      "risk_per_unit": 4194.1,
+      "dollar_risk": 10.0,
+      "stop_price": 88076.4,
+      "side": "short"
+    },
+    "atr_based": null,
+    "kelly": null
+  },
+  "constraints_applied": [],
+  "final_quantity": 0,
+  "unit_label": "contracts",
+  "final_notional": 0.0,
+  "margin_required": 0.0,
+  "final_risk_dollars": 0.0,
+  "final_risk_pct": 0.0,
+  "binding_constraint": null,
+  "zero_quantity_warning": "Calculated quantity is 0. Account size or risk budget is too small for this instrument at current entry/stop distance. Consider: increase account size, widen risk %, or use a lower-priced instrument."
+}

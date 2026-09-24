@@ -1,0 +1,6 @@
+{
+  "name": "okx-review-prism",
+  "version": "1.0",
+  "title": "棱镜复盘师",
+  "description": "自动拉取历史交易记录，计算绩效指标，结合当时行情进行结构化复盘并输出改进建议。依赖 portfolio/market/trade。"
+}

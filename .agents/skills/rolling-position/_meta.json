@@ -1,0 +1,6 @@
+{
+  "name": "rolling-position",
+  "version": "2.0",
+  "title": "自动滚仓（比特皇&予与版）",
+  "description": "智能滚仓助手 — 融合比特皇趋势滚仓与予与裸K波段两种模式。分析行情后给出结构化操作建议，通过 OKX Agent Trade Kit CLI 安全执行交易（密钥不离开本地）。触发词：/rolling-position, 滚仓, 加仓策略, 仓位管理 "
+}
