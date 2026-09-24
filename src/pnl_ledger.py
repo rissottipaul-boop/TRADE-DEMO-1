@@ -756,6 +756,8 @@ class Classifier:
         if category == "funding":
             inst = bill.get("instId") or ""
             return Attr(category, self.funding_by_inst.get(inst, self.funding_default), f"funding:{inst or '?'}")
+        if category == "interest":  # заём не привязан к ордеру: рукав не узнать, но это и не «ордер человека»
+            return Attr(category, self.default, f"interest:{bill.get('ccy') or '?'}", "проценты по займу")
         if category == "other":
             self.unknown_types[f"{bill_type}/{bill.get('subType')}"] += 1
         cl = bill.get("clOrdId") or ""
@@ -1105,6 +1107,13 @@ def build_report(inp: Inputs, rules: dict) -> dict:
     if classify.unknown_types:
         warnings.append("нераспознанные типы bills (type/subType: число) -> «прочее/ручное»: "
                         + ", ".join(f"{k}: {v}" for k, v in sorted(classify.unknown_types.items())))
+    interest_ccy: defaultdict = _dd()
+    for book in books.values():
+        for ccy, qty in book.interest.items():
+            interest_ccy[ccy] += qty
+    if _nonzero(interest_ccy):
+        warnings.append("проценты по займу за период (bills type 7): " + _holdings(_nonzero(interest_ccy))
+                        + " — на счёте был заём (autoLoan): проверить availBal и режим аккаунта (SPOT-TDMODE)")
     missing = sorted(getattr(inp.price, "missing", set()))
     if missing:
         warnings.append(f"нет цены в USDT для {', '.join(missing)} — стоимость этих валют принята 0")

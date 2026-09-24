@@ -63,7 +63,7 @@
 | Модуль | Назначение |
 | --- | --- |
 | `src/config.py` | Настройки из `.env` (demo по умолчанию) |
-| `src/connector.py` | CCXT-клиент OKX (`expTime` в заголовке), `emergency_stop` — отмена всех ордеров и остановка grid-ботов |
+| `src/connector.py` | CCXT-клиент OKX (`expTime` в заголовке), `emergency_stop` — отмена всех ордеров и остановка grid- и DCA-ботов |
 | `src/errors.py` | Карта кодов ошибок OKX с действиями |
 | `src/risk.py` | Риск-ядро: сайзинг, дневной лимит, max drawdown, блокировки, kill-switch |
 | `src/engine.py` | Движок: WS public + private, реконсиляция, equity, флаги `data/KILL` и `data/STOP_ENGINE` |
@@ -71,6 +71,9 @@
 | `src/order_router.py` | Выставление ордеров с риск-проверкой (используют стратегии) |
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
+| `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |
+| `src/pnl_ledger.py` + `ops/sleeves.json` | PnL по рукавам из bills (только чтение), отчёт за день или неделю; правила атрибуции; методика — `insights/pnl-ledger.md` |
+| `src/backtest/` | Бэктестер: загрузка свечей, событийный движок с риск-ядром, walk-forward, anti-lookahead, отчёт (`insights/backtester-design.md`) |
 | Дубли консолидированы (ARCH-DEDUP): `state.py` и `ws_public.py` удалены, канон — `storage.py` + `ws_client.py` | |
 
 | Что | Команда |
@@ -84,6 +87,8 @@
 | Биржа (только demo) | `okx --demo <module> <action> …`, скиллы в `.agents/skills/` |
 | Чьи ордера на счёте | `python -m src.order_audit [--hours 24]` — 0: норма, 1: есть ордер без метки агента или кода, 2: ошибка чтения |
 | Реестр и новый clOrdId | `python -m src.order_owner`, `python -m src.order_owner new trd` |
+| PnL по рукавам | `python -m src.pnl_ledger [--date YYYY-MM-DD] [--days 7] [--mode live]` — 0: норма, 1: есть предупреждения, 2: отчёт не построен |
+| Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей) |
 
 **Метка владельца ордера (ORDER-OWNER-TAG).** Каждый ордер, algo-ордер и бот, которые ставит агент, получают clOrdId с префиксом владельца. Коды владельцев: OKX Trader `trd`, Pump Risk Taker `pmp`, Ops Sentinel `sen`, Insight Executor `iex`, Crypto Insight Hunter `hnt`.
 
