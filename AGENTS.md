@@ -77,7 +77,7 @@
 | `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |
 | `src/pnl_ledger.py` + `ops/sleeves.json` | PnL по рукавам из bills (только чтение), отчёт за день или неделю; правила атрибуции; методика — `insights/pnl-ledger.md` |
 | `src/backtest/` | Бэктестер: загрузка свечей, событийный движок с риск-ядром, walk-forward, anti-lookahead, отчёт (`insights/backtester-design.md`) |
-| `src/pump_scanner.py` | Памп-сканер без LLM (PUMP-CODIFY): только публичные GET, закрытые 1H-свечи, фильтр скана №5; строка `scan` в `data/pump_journal.jsonl`; повтор прошлого скана `--at` |
+| `src/pump_scanner.py` | Памп-сканер без LLM (PUMP-CODIFY): только публичные GET, закрытые 1H-свечи, фильтр скана №5; ликвидность кандидата (PUMP-LIQ): глубина `market/books`, спред и оборот против лимита позиции `pump-pocket.json` (только чтение), иначе статус `illiquid` с причиной, `--no-liquidity` — без проверки; строка `scan` в `data/pump_journal.jsonl`; повтор прошлого скана `--at` (без стакана — только оборот) |
 | Дубли консолидированы (ARCH-DEDUP): `state.py` и `ws_public.py` удалены, канон — `storage.py` + `ws_client.py` | |
 
 | Что | Команда |
