@@ -15,6 +15,8 @@
 | **Pump Risk Taker** | Рисковый карман: импульсные сделки в пределах `pump-pocket.json` | `insights/pump-*.md`, `data/pump_journal.jsonl` |
 | **Ops Sentinel** | Мониторинг движка, риска и ботов; аварийные действия в сторону безопасности | `ops/incidents.md`, `ops/board.md` |
 
+Роли описаны в `.github/agents/*.agent.md`. Для Claude Code те же роли подключены субагентами `.claude/agents/*.md` (`insight-executor`, `crypto-insight-hunter`, `okx-trader`, `ops-sentinel`, `pump-risk-taker`). Это обёртки: субагент читает файл своей роли, поэтому источник правды один. Оркестратор в Claude Code — основная сессия.
+
 ## 2. Автономия: кто что решает
 
 Правило асимметрии: **в сторону безопасности агент действует сам и сразу, в сторону риска — никогда.**
