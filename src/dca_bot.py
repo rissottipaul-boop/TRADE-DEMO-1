@@ -18,10 +18,15 @@ max_total_usdt и проверкой периметра before_buy (окно ops
 префиксом clOrdId `botsdca` в demo и `botldca` в live — live-владелец в demo
 и demo-владелец в live конструктор не принимает.
 
-Equity для риск-ядра по умолчанию — USDT-баланс (так было на demo, где
-покупки на $5 теряются в 100k). В live runner передаёт equity_fn со стоимостью
-всего кармана: иначе каждая покупка выглядела бы просадкой, и после траты 15%
-кармана сработал бы глобальный breaker.
+Equity для риск-ядра по умолчанию — totalEq торгового счёта из GET
+account/balance (USD), та же величина, что у движка (engine._update_equity):
+в demo бот и движок пишут в общий data/risk_state.db, и HWM с просадкой должны
+считаться от одного источника. USDT-баланс для этого не годится: HWM ≈ 104 000
+от движка и ≈ 16 600 USDT от бота давали ложный глобальный breaker «−84%»
+(DCA-EQUITY-SRC). Не прочитали totalEq — update_equity не зовём: вход решает
+свежесть equity от другого фида (insights/risk-core.md §6). В live runner
+передаёт equity_fn со стоимостью всего кармана (своё риск-состояние в data/live/):
+USDT-баланс и там выглядел бы просадкой после каждой покупки.
 
 Особенность интеграции с риск-ядром: risk.check_entry_allowed запрещает
 повторный вход по инструменту, по которому числится открытый риск
@@ -33,6 +38,7 @@ risk.register_spot_buy(inst_id) — явный API доливки спот-по�
 а брейкеры сработают при реальной просадке equity от HWM.
 """
 import logging
+import math
 import time
 from typing import Any, Callable, Optional
 
@@ -138,16 +144,33 @@ class DCABot:
     # --- Рыночные данные ---
 
     def _fetch_equity(self) -> Optional[float]:
-        """Equity в USDT из баланса (CCXT unified: balance['total']['USDT'])."""
+        """Equity для риск-ядра — totalEq торгового счёта (GET account/balance, USD).
+
+        Та же величина, что у движка (engine._update_equity): в demo оба процесса
+        пишут в общий data/risk_state.db (DCA-EQUITY-SRC). None — equity не прочитан:
+        ошибка запроса, code ≠ 0, нет totalEq, не число или ≤ 0. Тогда update_equity
+        не зовём, вход решает свежесть equity от другого фида (insights/risk-core.md §6):
+        ноль или мусор в update_equity дали бы ложный глобальный breaker, а снимает
+        его только человек. Настоящая просадка приходит положительным totalEq.
+        """
         try:
-            balance = okx_call(self.exchange.fetch_balance)
+            resp = okx_call(self.exchange.private_get_account_balance)
+            code = str(resp.get("code", "0"))
+            raw = (resp.get("data") or [{}])[0].get("totalEq")
         except Exception as exc:
-            log.warning("fetch_balance не удался (%s) — snapshot equity пропущен", exc)
+            log.warning("account/balance не прочитан (%s) — snapshot equity пропущен", exc)
             return None
-        total = (balance.get("total") or {}).get("USDT")
-        if total is None:
-            total = (balance.get("USDT") or {}).get("total")
-        return float(total) if total is not None else None
+        if code != "0":
+            log.warning("account/balance: code=%s — snapshot equity пропущен", code)
+            return None
+        try:
+            total = float(raw)
+        except (TypeError, ValueError):
+            total = math.nan
+        if not math.isfinite(total) or total <= 0:
+            log.warning("account/balance: totalEq=%r не годится как equity — snapshot equity пропущен", raw)
+            return None
+        return total
 
     def _fetch_price(self) -> float:
         ticker = okx_call(self.exchange.fetch_ticker, self.inst_id)
@@ -204,14 +227,16 @@ class DCABot:
                     self._set_state(self.STATE_DONE)
                     break
 
-                # 1. Снимок equity (обязателен каждую итерацию)
+                # 1. Снимок equity каждую итерацию; None — не прочитан, решает
+                #    свежесть equity от другого фида (update_equity не зовём)
                 equity = self._equity_fn()
                 if equity is not None:
                     self.storage.record_equity(EquityRecord(
                         ts=time.time(), total_eq=equity, avail_eq=equity, upl=0.0,
                     ))
                     risk.update_equity(equity)
-                    log.info("equity snapshot: %.2f USDT", equity)
+                    # demo: totalEq в USD; live: стоимость кармана в USDT (equity_fn)
+                    log.info("equity snapshot: %.2f", equity)
 
                 # 2. Допуск риск-слоя (kill_switch / breakers / лимиты)
                 allowed, reason = risk.check_entry_allowed(self.inst_id, "buy")
