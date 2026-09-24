@@ -41,9 +41,29 @@ algo-ордеров + остановка grid- и DCA-ботов); после о
 
 Демо-принцип: роутер принимает готовый exchange-объект (см. connector.py),
 сам ключи и .env не читает.
+
+Выход из позиции (ROUTER-EXIT) — отдельный метод place_exit_order, а не вход.
+Он не проходит risk.check_entry_allowed: kill-switch, breaker'ы, свежесть
+equity, пауза, лимит входов, блокировка инструмента, хедж и heat выход не
+держат, иначе при аварии позицию нельзя было бы закрыть. Вместо этого
+risk.check_exit_allowed пропускает только выход из позиции, которую знает
+риск-ядро: слот по inst_id есть, сторона противоположна, размер не больше
+остатка (sz=None — весь остаток). Остаток — размер входа, который place_order
+записывает через risk.register_entry_size. Вход без размера (движок, грид)
+через роутер не закрыть. Второй рубеж — биржа: на споте продажа сверх баланса
+не пройдёт (в режимах с займом её отклонит check_no_borrow), на контрактах
+выход идёт с reduceOnly=True. Проверки ордера выход проходит так же, как
+вход: параметры, tdMode и запрет займа по режиму аккаунта, throttler,
+expTime, clOrdId с меткой владельца. Слот выход не занимает и во входы дня не
+считается. Освобождается слот по исполнению: исполненный объём уходит в
+risk.release_position, остаток уменьшается, а у нуля слот удаляется.
+Неисполненный выход (limit, частичное исполнение) роутер помнит и дочитывает в
+settle_exits. После рестарта процесса этот список пуст, и слот остаётся
+занятым до record_pnl стратегии — это безопасная сторона.
 """
 import json
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -84,6 +104,46 @@ ACCOUNT_MODE_TTL_S = 300.0
 
 # CCXT unified side -> сторона позиции для risk.validate_stop_vs_liquidation
 _SIDE_TO_POSITION = {"buy": "long", "sell": "short"}
+
+# Финальные статусы CCXT: после них исполнение ордера выхода не меняется (ROUTER-EXIT)
+_FINAL_STATUSES = frozenset({"closed", "canceled", "expired", "rejected"})
+
+
+def _number(value: Any) -> Optional[float]:
+    """Конечное число или None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _exit_params_error(side: str, ord_type: str, px: Any, sz: Any) -> str:
+    """Причина отказа по параметрам выхода или пустая строка."""
+    if side not in ("buy", "sell"):
+        return f"сторона выхода {side!r}: нужна buy или sell"
+    if ord_type not in ("limit", "market"):
+        return f"тип ордера выхода {ord_type!r}: нужен limit или market"
+    if px is not None and not (_number(px) or 0) > 0:
+        return f"некорректная цена px={px!r}"
+    if ord_type == "limit" and px is None:
+        return "limit-выход без цены px"
+    if sz is not None and not (_number(sz) or 0) > 0:
+        return f"некорректный sz={sz!r}"
+    return ""
+
+
+def _exit_fill(order: dict, sz: float) -> tuple[float, bool]:
+    """(исполненный объём, статус финальный) ордера выхода по ответу CCXT.
+
+    Если filled нет, у closed исполнен весь sz, у остальных статусов 0: слот
+    освобождается только по подтверждённому исполнению.
+    """
+    status = order.get("status")
+    filled = _number(order.get("filled"))
+    if filled is None or filled < 0:
+        filled = sz if status == "closed" else 0.0
+    return min(filled, sz), status in _FINAL_STATUSES
 
 
 class _PlaceThrottler:
