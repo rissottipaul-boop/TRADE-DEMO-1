@@ -4,8 +4,21 @@
 Kill-switch: создать файл data/KILL (текст внутри — причина) или
 `python -m src.ops kill`. Движок отменит все ордера, включая algo, и
 заблокирует входы до ручного сброса (`python -m src.ops reset kill`).
-Нативные grid-боты OKX тоже останавливаются (монеты остаются на счёте).
-Штатная остановка: файл data/STOP_ENGINE (или `ops/engine.ps1 stop`).
+Нативные grid- и DCA-боты OKX тоже останавливаются (stopType 2: монеты и
+позиции остаются на счёте, FLEET-KILL-DCA).
+Штатная остановка: файл data/STOP_ENGINE (или `ops/engine.ps1 stop`). Текст
+обоих флагов — источник остановки — пишется в лог до удаления флага.
+
+Владение kill-switch (ENGINE-KILL-REG): движок подписывается через реестр
+connector.register_kill_callback, а в слот risk ставит единый диспетчер
+connector.kill_switch_dispatch — как OrderRouter. Порядок создания движка и
+роутера в одном процессе больше не важен: при kill вызываются все подписчики.
+stop() отписывает движок и закрывает хранилище (WAL-чекпойнт).
+
+Спот-ордера (ENGINE-TDMODE): tdMode по режиму аккаунта (src/account_mode.py,
+как в OrderRouter): acctLv 1–2 → cash, 3–4 → cross; режим перечитывается раз в
+5 мин. Если заём возможен (autoLoan в режимах 3–4 или enableSpotBorrow), ордер
+больше availBal отклоняется до биржи. Режим или баланс не прочитаны — отказ.
 
 Блокирующие вызовы CCXT выполняются в потоках (asyncio.to_thread): троттлер
 CCXT спит через time.sleep и иначе останавливал бы event loop вместе с WS-пингами.
@@ -20,13 +33,25 @@ from typing import Optional
 import ccxt
 
 from . import risk
+from .account_mode import (
+    AccountMode,
+    check_no_borrow,
+    describe_mode,
+    fetch_account_mode,
+    is_spot,
+    spot_order_params,
+)
 from .config import load_settings
 from .connector import (
     check_time_sync,
     create_exchange,
     emergency_stop,
     exp_time_ms,
+    kill_switch_dispatch,
     new_client_order_id,
+    okx_call,
+    register_kill_callback,
+    unregister_kill_callback,
 )
 from .reconciler import Reconciler, order_record_from_okx, to_float, trade_record_from_ws_order
 from .storage import EquityRecord, OrderRecord, Storage
@@ -37,10 +62,39 @@ log = logging.getLogger("okx.engine")
 KILL_FLAG = Path("data/KILL")
 STOP_FLAG = Path("data/STOP_ENGINE")
 ORDER_TTL_MS = 5000  # expTime: биржа отбросит place, если он дошёл позже
+# Режим аккаунта перечитывается не чаще раза в 5 мин, как в OrderRouter:
+# человек может сменить его на ходу, а account/config — 5 запросов / 2 с
+ACCOUNT_MODE_TTL_S = 300.0
+FLAG_TEXT_LIMIT = 500  # символов текста флага в логе и в причине kill
+
+
+def read_flag_text(path: Path) -> str:
+    """Текст файла-флага для лога; не бросает исключений.
+
+    Флаг пишут человек и скрипты PowerShell: Set-Content в Windows PowerShell 5.1
+    пишет в ANSI (cp1251), `>` и Out-File — в UTF-16 с BOM. Раньше read_text(utf-8)
+    на таком флаге бросал UnicodeDecodeError: цикл флагов падал, движок выходил
+    без kill-switch, а data/KILL оставался. Теперь: BOM UTF-16 → UTF-16, иначе
+    UTF-8 (с BOM или без), не UTF-8 → cp1251. Флаг не прочитан (исчез, занят) —
+    описание ошибки вместо текста: флаг всё равно обрабатывается.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return f"<не прочитан: {type(exc).__name__}: {exc}>"
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp1251", errors="replace")
+    text = " ".join(text.split())  # одна строка лога
+    return text if len(text) <= FLAG_TEXT_LIMIT else text[:FLAG_TEXT_LIMIT] + "…"
 
 
 class RiskRejected(Exception):
-    """Ордер отклонён риск-ядром."""
+    """Ордер отклонён до биржи: риск-ядро или режим аккаунта (tdMode, скрытый заём)."""
 
 
 class TradingEngine:
@@ -51,7 +105,14 @@ class TradingEngine:
         self.inst_ids = tuple(inst_ids)
         self.inst_type = inst_type
         self.reconciler = Reconciler(self.ex, self.db, inst_type=inst_type)
-        risk.set_order_canceller(self._cancel_all_for_kill_switch)
+        # Kill-switch (ENGINE-KILL-REG): подписка через реестр connector, в слот
+        # risk — единый диспетчер (как OrderRouter). Прямая регистрация
+        # колбэка движка перезаписывала бы подписку роутера в том же процессе.
+        register_kill_callback(self._cancel_all_for_kill_switch)
+        risk.set_order_canceller(kill_switch_dispatch)
+        # Режим аккаунта для tdMode спота (ENGINE-TDMODE), кэш ACCOUNT_MODE_TTL_S
+        self._account_mode: Optional[AccountMode] = None
+        self._account_mode_at = 0.0
 
         urls = ws_urls(self.settings.domain, self.settings.is_demo)
         self.ws_public = OKXWebSocket(WSConfig(url=urls.public), on_message=self._on_public_message)
@@ -82,6 +143,7 @@ class TradingEngine:
         drift = await asyncio.to_thread(check_time_sync, self.ex)
         log.info("Time drift: %+d ms", drift)
         await asyncio.to_thread(self.ex.load_markets)
+        await self._log_account_mode()
 
         await self._reconcile()
         await self._update_equity()
@@ -109,11 +171,18 @@ class TradingEngine:
 
     async def stop(self) -> None:
         self._running = False
-        await self.ws_public.close()
-        if self.ws_business is not None:
-            await self.ws_business.close()
-        await self.ws_private.close()
-        self._save_stats()
+        try:
+            await self.ws_public.close()
+            if self.ws_business is not None:
+                await self.ws_business.close()
+            await self.ws_private.close()
+            self._save_stats()
+        finally:
+            # Даже если закрытие WS упало: отписка от kill-switch (симметрично
+            # OrderRouter.close) и WAL-чекпойнт хранилища перед выходом
+            # (ENGINE-STORAGE-CLOSE; Storage.close идемпотентен)
+            unregister_kill_callback(self._cancel_all_for_kill_switch)
+            self.db.close()
         log.info("Engine stopped. Stats: %s", self.stats)
 
     async def subscribe_market_data(self, channel: str, inst_id: str) -> None:
@@ -222,21 +291,81 @@ class TradingEngine:
         """Файлы-флаги: data/KILL — аварийная остановка торговли, data/STOP_ENGINE — штатный выход."""
         while self._running:
             if KILL_FLAG.exists():
-                reason = KILL_FLAG.read_text(encoding="utf-8").strip() or "file flag"
+                # текст флага — в лог ДО unlink: после удаления источник не восстановить
+                reason = read_flag_text(KILL_FLAG) or "file flag"
+                log.critical("KILL-флаг %s: %s", KILL_FLAG, reason)
                 KILL_FLAG.unlink(missing_ok=True)
                 report = await asyncio.to_thread(risk.kill_switch, False, f"flag: {reason}")
                 log.critical("KILL-SWITCH: отменено %d, не отменено %d",
                              len(report["cancelled"]), len(report["failed"]))
             if STOP_FLAG.exists():
+                # ENGINE-FLAG-LOG: кто и когда остановил (ops/engine.ps1 stop пишет
+                # «ops/engine.ps1 stop <время>»); пустой флаг — источник не указан
+                source = read_flag_text(STOP_FLAG) or "флаг пустой, источник не указан"
+                log.info("STOP_ENGINE: штатная остановка по флагу %s: %s", STOP_FLAG, source)
                 STOP_FLAG.unlink(missing_ok=True)
-                log.info("STOP_ENGINE: штатная остановка по флагу")
                 return
             await asyncio.sleep(2)
 
     def _cancel_all_for_kill_switch(self, flatten: bool) -> dict:
+        """Подписчик реестра kill-switch (вызывает connector.kill_switch_dispatch).
+
+        connector.emergency_stop: отмена обычных и algo-ордеров, остановка grid-
+        и DCA-ботов. Локальные ордера в storage поправит реконсиляция.
+        """
         if flatten:
             log.error("flatten не реализован: позиции закрываются по стопам или вручную")
         return emergency_stop(self.ex)
+
+    # --- Режим аккаунта (ENGINE-TDMODE) ---
+
+    async def _get_account_mode(self) -> AccountMode:
+        """Режим аккаунта: account/config, кэш ACCOUNT_MODE_TTL_S (как OrderRouter.account_mode)."""
+        now = time.monotonic()
+        if self._account_mode is None or now - self._account_mode_at > ACCOUNT_MODE_TTL_S:
+            mode = await asyncio.to_thread(okx_call, fetch_account_mode, self.ex)
+            if self._account_mode is not None and mode != self._account_mode:
+                log.warning("режим аккаунта сменился: %s -> %s", self._account_mode, mode)
+            self._account_mode, self._account_mode_at = mode, now
+        return self._account_mode
+
+    async def _log_account_mode(self) -> None:
+        """При старте: режим аккаунта в лог. Сбой чтения — предупреждение, не остановка:
+        сверке и equity режим не нужен, а спот-ордера без него отклоняются."""
+        try:
+            mode = await self._get_account_mode()
+        except Exception as exc:
+            log.warning("Режим аккаунта не прочитан (%s) — спот-ордера будут отклоняться, "
+                        "пока account/config не прочитается", exc)
+            return
+        log.info("Режим аккаунта: %s", describe_mode(mode))
+
+    async def _spot_params(self, inst_id: str, side: str, ord_type: str, sz: float,
+                           px: Optional[float]) -> dict:
+        """tdMode (и tgtCcy/cost рыночной покупки в режиме cross) для спот-ордера.
+
+        Порядок и тексты отказов — как OrderRouter._spot_params: режим аккаунта →
+        запрет скрытого займа (check_no_borrow) → spot_order_params. Любой отказ —
+        RiskRejected до обращения к create_order. Не спот — {} (деривативы: tdMode
+        задаёт вызывающий, как раньше).
+        """
+        if not is_spot(inst_id):
+            return {}
+        try:
+            mode = await self._get_account_mode()
+        except Exception as exc:  # без режима tdMode не выбрать — ордер не ставим
+            raise RiskRejected(f"режим аккаунта не прочитан ({exc}) — tdMode спота не выбрать") from exc
+        try:
+            ok, reason = await asyncio.to_thread(
+                check_no_borrow, self.ex, mode, inst_id, side, ord_type, sz, px)
+        except Exception as exc:
+            raise RiskRejected(f"availBal не прочитан ({exc}) — заём не исключить") from exc
+        if not ok:
+            raise RiskRejected(reason)
+        try:
+            return spot_order_params(mode, ord_type, side, sz, px)
+        except ValueError as exc:  # рыночная покупка в режиме cross без цены
+            raise RiskRejected(str(exc)) from exc
 
     # --- Ордера ---
 
@@ -250,13 +379,17 @@ class TradingEngine:
         *,
         entry: Optional[bool] = None,
     ) -> OrderRecord:
-        """Ставит ордер: риск-проверка входа → clOrdId + expTime → запись в БД.
+        """Ставит ордер: риск-проверка входа → режим аккаунта (спот) → clOrdId + expTime → запись в БД.
 
         entry — открытие/наращивание позиции (проверяется риск-ядром). По
         умолчанию для спота buy = вход, sell = выход: выходы breaker'ами не
         блокируются, иначе при срабатывании защиты нельзя было бы закрыться.
         Учёт открытой позиции (risk.register_entry) — на стороне стратегии,
         после фактического исполнения.
+
+        Спот (и вход, и выход): tdMode по режиму аккаунта и запрет скрытого
+        займа (ENGINE-TDMODE, _spot_params). Рыночная покупка в режиме cross
+        требует px: по нему считается сумма в котируемой валюте (tgtCcy=quote_ccy).
         """
         if ord_type not in ("limit", "market", "post_only"):
             raise ValueError(f"Unsupported ord_type: {ord_type}")
@@ -270,9 +403,10 @@ class TradingEngine:
             if not allowed:
                 raise RiskRejected(reason)
             await self._check_notional(inst_id, sz, px)
+        mode_params = await self._spot_params(inst_id, side, ord_type, sz, px)
 
         cl_ord_id = new_client_order_id()
-        params = {"clOrdId": cl_ord_id, "expTime": exp_time_ms(ORDER_TTL_MS)}
+        params = {**mode_params, "clOrdId": cl_ord_id, "expTime": exp_time_ms(ORDER_TTL_MS)}
         ccxt_type = "limit" if ord_type == "post_only" else ord_type
         if ord_type == "post_only":
             params["postOnly"] = True

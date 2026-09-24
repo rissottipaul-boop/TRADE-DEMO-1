@@ -68,10 +68,10 @@
 | `src/connector.py` | CCXT-клиент OKX (`expTime` в заголовке), `emergency_stop` — отмена всех ордеров и остановка grid- и DCA-ботов |
 | `src/errors.py` | Карта кодов ошибок OKX с действиями |
 | `src/risk.py` | Риск-ядро: сайзинг, дневной лимит, max drawdown, блокировки, kill-switch |
-| `src/engine.py` | Движок: WS public + private, реконсиляция, equity, флаги `data/KILL` и `data/STOP_ENGINE` |
+| `src/engine.py` | Движок: WS public + private, реконсиляция, equity раз в 300 с, флаги `data/KILL` и `data/STOP_ENGINE` (текст флага — в лог), kill-switch через реестр `connector.register_kill_callback`, tdMode спота по режиму аккаунта (`account_mode.py`) |
 | `src/ws_client.py`, `src/storage.py`, `src/reconciler.py` | WS-клиент, SQLite-состояние движка, сверка с биржей |
 | `src/order_router.py` | Выставление ордеров с риск-проверкой (используют стратегии) |
-| `src/account_mode.py` | Режим аккаунта (`acctLv`, autoLoan): tdMode спота и запрет скрытого займа — для роутера, скриптов и live-preflight |
+| `src/account_mode.py` | Режим аккаунта (`acctLv`, autoLoan): tdMode спота и запрет скрытого займа — для роутера, движка, скриптов и live-preflight |
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
 | `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |
@@ -92,7 +92,7 @@
 | Чьи ордера на счёте | `python -m src.order_audit [--hours 24]` — 0: норма, 1: есть ордер без метки агента или кода, 2: ошибка чтения |
 | Реестр и новый clOrdId | `python -m src.order_owner`, `python -m src.order_owner new trd` |
 | PnL по рукавам | `python -m src.pnl_ledger [--date YYYY-MM-DD] [--days 7] [--mode live]` — 0: норма, 1: есть предупреждения, 2: отчёт не построен |
-| Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей) |
+| Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей); mean-reversion — `python -m src.backtest.meanrev --out insights/meanrev-backtest.md` |
 | Режим аккаунта | `python -m src.account_mode status` (только чтение), `precheck --acct-lv N` (только чтение), `switch --acct-lv N` (только demo; при блокерах precheck не переключает) |
 | Памп-скан (без ключей) | `python -m src.pump_scanner --exclude <базы флота> [--json] [--no-journal]`; повтор: `--at 2026-09-24T09:47+05:00 --pairs OKB-USDT …` — 0: скан выполнен, 2: ошибка данных или сети |
 
