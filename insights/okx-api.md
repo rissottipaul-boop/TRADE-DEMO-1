@@ -300,6 +300,57 @@
     - У okx `options['createMarketBuyOrderRequiresPrice'] = False`. При `tgtCcy=quote_ccy` без `cost` CCXT отправляет `amount` как сумму в котируемой валюте без умножения на цену и обрезает её до шага цены: 0.0002 BTC превращается в `sz="0"`.
     - Поэтому `account_mode.spot_order_params` для рыночной покупки в режиме cross передаёт `tgtCcy=quote_ccy` и `cost = sz × px`: в запрос уходит `sz="10"` USDT. Лимитные ордера и рыночная продажа — в базе.
     - По документации OKX (`POST /trade/order`, поле `sz`) рыночная покупка с маржой задаётся в котируемой валюте. На demo в `acctLv=3` это ещё не проверено — остаток SPOT-TDMODE.
+24. **Смена режима аккаунта через API** (ACCT-SWITCH-CLI, 24.09). **Пункт по документации и исходникам SDK — на demo ещё не проверен**; итог первого прогона допишет ACCT-MODE-DERIV. Источники:
+    - официальное зеркало документации `okx/ai-builder-openapi-md` (коммит `66d7662` от 31.08.2026): `preCheckAccountLevel.md`, `setAccountLevel.md`, `preSetAccountLevel.md`, `errors/rest/account.md` — EN и ZH;
+    - модели `JKorf/OKX.Net`: `OKXAccountSwitchCheckResult`, перечисления `AccountSwitchCheckResult` и `UnmatchedInfoType`;
+    - пути и методы — `tiagosiebler/okx-api` (`getAccountSwitchPrecheck`, `setAccountMode` → `{acctLv}`) и `okx/python-okx` (`Account.set_account_level`);
+    - исходники CCXT 4.5.83 и okx CLI 1.4.8.
+
+    Что известно:
+    - **Эндпоинты**, оба — 5 запросов/2 с на UID:
+      - `GET /api/v5/account/set-account-switch-precheck?acctLv=N` — проверка, только чтение; в CCXT `private_get_account_set_account_switch_precheck`;
+      - `POST /api/v5/account/set-account-level`, тело `{"acctLv": "N"}`, ответ `data[0].acctLv`; в CCXT `private_post_account_set_account_level`.
+
+      Офлайн-подпись CCXT (`tests/test_account_mode.py::CcxtSwitchRequestTest`) даёт `GET …?acctLv=2`, POST с JSON-телом и заголовком `x-simulated-trading: 1`.
+    - **`POST /account/account-level-switch-preset`** (preset плеча) обязателен только при выходе из Portfolio margin с кросс-позициями контрактов, иначе `50014`. Команда проекта его не вызывает.
+    - **У okx CLI 1.4.8 смены режима нет** — только `account config` и `set-position-mode`.
+    - **Первое включение режима — только в Web/App.** Документация: EN «for the first set of every account mode», ZH «账户模式的首次设置». Иначе `51070` «You do not meet the requirements for switching to this account mode. Please upgrade the account mode on the OKX website or App».
+      - Режим 3 на этом demo-аккаунте, вероятно, включили вручную (incidents.md 10:10).
+      - Включали ли когда-нибудь режим 2 — неизвестно, поэтому на переходе 3 → 2 возможен `51070`.
+    - **Ответ precheck (`data[0]`):**
+      - `sCode`: `0` — все проверки пройдены; `1` — несовместимые условия; `3` — не задано плечо кросс-позиций (preset); `4` — не пройдены тиры позиций или маржа;
+      - `curAcctLv`, `acctLv`, `riskOffsetType` (устарел);
+      - `unmatchedInfoCheck[]` — `type`, `totalAsset` (только у `asset_validation`) и `posList`. Типов 20, среди них `pending_orders`, `pending_algos` («algo-ордера и торговые боты: iceberg, recurring buy, TWAP»), `cross_margin`, `all_positions`, `repay_borrowings`, `asset_validation`. Полный перечень с расшифровкой — `UNMATCHED_TYPES` в `src/account_mode.py`;
+      - `posList[]` — `{posId, lever}` кросс-позиций контрактов с плечом после перехода;
+      - `posTierCheck[]` — `{instFamily, instType, pos, lever, maxSz}`, только при sCode 4;
+      - `mgnBf`/`mgnAft` — `{acctAvailEq, mgnRatio, details[{ccy, availEq, mgnRatio}]}` при sCode 0/4, иначе `null`.
+    - **Расхождение источников:** у блокера `posList` в документации — массив строк posId, в OKX.Net — объекты `{posId, lever}`. Модуль разбирает оба вида.
+    - **CCXT:** `okx.handle_errors` бросает исключение, только если `code` не 0 и не 2. `sCode` precheck при `code 0` для CCXT не ошибка — его разбирает `src/account_mode.py`: «можно» только при `sCode 0` и пустом `unmatchedInfoCheck`, всё непонятное — блокер. Кодов 51070 и 591xx в карте исключений CCXT нет: летит общий `ExchangeError`, код достаёт `errors.extract_error_code`.
+    - **Коды отказа переключения** (`errors/rest/account.md`):
+      - `59001` — займы;
+      - `59132` — активные ордера или несовместимые боты («refer to the pre-check endpoint to stop any incompatible bots»);
+      - `59133` — мало активов;
+      - `59134` — несовместимые позиции;
+      - `59135` — копитрейдинг;
+      - `59136` и `59137` — плечо кросс-позиций: задать preset или снизить;
+      - `59138` — тиры позиций;
+      - `59139` — проверка маржи.
+
+      В `errors.ERROR_MAP` этих кодов пока нет: CLI показывает текст OKX, у `51070` — подсказку.
+
+    **Порядок в проекте:** `python -m src.account_mode switch --acct-lv N`, только demo, live — отказ без сети. Шаги:
+    1. `account/config`: режим уже N → выход 0;
+    2. precheck: есть блокеры → выход 1, POST не уходит;
+    3. POST `account/set-account-level`;
+    4. `account/config` до 3 раз с паузой 1 с: режим совпал → выход 0, нет → выход 1.
+
+    Ошибки OKX и CCXT дают выход 2.
+
+    **Не проверено на demo:**
+    - реальный ответ precheck для перехода 3 → 2;
+    - считает ли OKX работающих spot grid/DCA-ботов флота блокером `pending_algos`. Слова «incompatible bots» в 59132 намекают, что мешают не все боты. Наблюдение: боты флота, созданные при `acctLv=1` в 08:46–08:53, работали и после перехода 1 → 3 (в 09:56 уже `acctLv=3`, в 10:00 флот running — FLEET-KILL-DCA). Значит, в Web/App переход с ними прошёл;
+    - нужен ли Web/App для первого включения режима 2 (`51070`);
+    - сразу ли `account/config` показывает новый режим после POST.
 
 ## Открытые вопросы
 

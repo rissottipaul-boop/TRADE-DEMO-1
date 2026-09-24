@@ -44,7 +44,7 @@ CLI (ACCT-SWITCH-CLI). У okx CLI 1.4.8 смены режима нет, есть
 - N — от 1 до 4, проверяется до сети. Других эндпоинтов команды не вызывают:
   ордеров не ставят, ботов, движок и preset (account-level-switch-preset) не трогают.
 - Коды выхода:
-  - 0 — прочитано, можно переключать или переключено;
+  - 0 — прочитано, можно переключать, переключено или режим уже N;
   - 1 — блокеры или смена не подтвердилась;
   - 2 — код OKX ≠ 0, исключение CCXT, нет ключей, неверный N или switch вне demo.
   Ошибка описывается через errors.explain_error вместе с ответом OKX.
@@ -574,7 +574,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return args.func(args)
     except Exception as exc:  # не глушим: понятное сообщение и выход 2
         print(f"Ошибка {args.cmd} [{args.mode or '?'}]: {describe_error(exc)}", file=sys.stderr)
-        if args.cmd == "switch":
+        if args.cmd == "switch" and isinstance(exc, (ccxt.BaseError, OkxResponseError)):
+            # запрос мог дойти до биржи (таймаут POST) — фактический режим неизвестен
             print("Режим после сбоя проверьте: python -m src.account_mode status", file=sys.stderr)
         return 2
 

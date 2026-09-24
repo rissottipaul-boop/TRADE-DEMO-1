@@ -93,6 +93,7 @@
 | Реестр и новый clOrdId | `python -m src.order_owner`, `python -m src.order_owner new trd` |
 | PnL по рукавам | `python -m src.pnl_ledger [--date YYYY-MM-DD] [--days 7] [--mode live]` — 0: норма, 1: есть предупреждения, 2: отчёт не построен |
 | Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей) |
+| Режим аккаунта | `python -m src.account_mode status` (только чтение), `precheck --acct-lv N` (только чтение), `switch --acct-lv N` (только demo; при блокерах precheck не переключает) |
 | Памп-скан (без ключей) | `python -m src.pump_scanner --exclude <базы флота> [--json] [--no-journal]`; повтор: `--at 2026-09-24T09:47+05:00 --pairs OKB-USDT …` — 0: скан выполнен, 2: ошибка данных или сети |
 
 **Метка владельца ордера (ORDER-OWNER-TAG).** Каждый ордер, algo-ордер и бот, которые ставит агент, получают clOrdId с префиксом владельца. Коды владельцев: OKX Trader `trd`, Pump Risk Taker `pmp`, Ops Sentinel `sen`, Insight Executor `iex`, Crypto Insight Hunter `hnt`.
