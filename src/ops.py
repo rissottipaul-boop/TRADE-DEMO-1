@@ -4,7 +4,9 @@
 одного режима. Режим выбирает и ключи, и файлы состояния (config.state_paths):
 demo — data/risk_state.db и data/bot_state.db, live — data/live/.
 
-    python -m src.ops status                     # риск-снапшот + метрики движка + открытые ордера
+    python -m src.ops status                     # риск-снапшот + метрики движка + открытые ордера;
+                                                 # у движка errors_exchange, errors_internal, pauses
+                                                 # (null — движок на коде до ENGINE-ERR-CLASS)
     python -m src.ops status --mode live         # то же для live-кармана
     python -m src.ops kill "причина"             # отменить ВСЕ ордера (включая algo), остановить
                                                  # grid- и DCA-ботов OKX, заблокировать входы
@@ -20,6 +22,7 @@ import argparse
 import json
 import logging
 import sys
+from typing import Optional
 
 from . import risk
 from .config import MODES, StatePaths, default_mode, load_settings, state_paths
@@ -40,13 +43,28 @@ def _init_risk(mode: str) -> StatePaths:
     return paths
 
 
+# Счётчики движка, которые status показывает всегда (ENGINE-ERR-CLASS,
+# ENGINE-PAUSE-DETECT): errors = errors_exchange + errors_internal
+ENGINE_STAT_KEYS = ("errors", "errors_exchange", "errors_internal", "pauses")
+
+
+def engine_view(stats: Optional[dict]) -> Optional[dict]:
+    """Статистика движка для status. Нет ключа — null: движок работает на старом коде."""
+    if stats is None:
+        return None
+    view = dict(stats)
+    for key in ENGINE_STAT_KEYS:
+        view.setdefault(key, None)
+    return view
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     paths = _init_risk(args.mode)
     storage = Storage(paths.bot_db)
     print(json.dumps({
         "mode": args.mode,
         "risk": risk.status(),
-        "engine": storage.get_ws_state("engine_stats"),
+        "engine": engine_view(storage.get_ws_state("engine_stats")),
         "open_orders_local": [dict(r) for r in storage.get_open_orders()],
     }, ensure_ascii=False, indent=2, default=str))
     return 0

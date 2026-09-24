@@ -20,15 +20,26 @@ stop() отписывает движок и закрывает хранилищ�
 5 мин. Если заём возможен (autoLoan в режимах 3–4 или enableSpotBorrow), ордер
 больше availBal отклоняется до биржи. Режим или баланс не прочитаны — отказ.
 
+Сон Windows (ENGINE-KEEPAWAKE): пока движок работает, он держит запрос
+SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) — система не уходит
+в сон, экран гаснуть может; stop() снимает запрос. Настройки питания не меняются.
+Пауза процесса (ENGINE-PAUSE-DETECT): между сверками прошло больше двух
+интервалов — WARNING «пауза процесса N с» и счётчик pauses в статистике.
+Ошибки циклов (ENGINE-ERR-CLASS): errors_exchange — сбой на стороне биржи или
+сети (OKX 50001/50004/50013/50026, HTTP 5xx, таймауты и обрывы соединения),
+errors_internal — всё остальное, в том числе 50011; errors — их сумма.
+
 Блокирующие вызовы CCXT выполняются в потоках (asyncio.to_thread): троттлер
 CCXT спит через time.sleep и иначе останавливал бы event loop вместе с WS-пингами.
 """
 import asyncio
 import json
 import logging
+import re
+import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import ccxt
 
@@ -53,6 +64,7 @@ from .connector import (
     register_kill_callback,
     unregister_kill_callback,
 )
+from .errors import extract_error_code
 from .reconciler import Reconciler, order_record_from_okx, to_float, trade_record_from_ws_order
 from .storage import EquityRecord, OrderRecord, Storage
 from .ws_client import OKXWebSocket, WSConfig, WSCredentials, ws_urls
@@ -66,6 +78,74 @@ ORDER_TTL_MS = 5000  # expTime: биржа отбросит place, если он
 # человек может сменить его на ходу, а account/config — 5 запросов / 2 с
 ACCOUNT_MODE_TTL_S = 300.0
 FLAG_TEXT_LIMIT = 500  # символов текста флага в логе и в причине kill
+
+# --- Сон Windows (ENGINE-KEEPAWAKE) ---
+# SetThreadExecutionState: флаги winbase.h. ES_DISPLAY_REQUIRED не ставим —
+# экран может гаснуть. Запрос привязан к вызвавшему потоку и снимается при его
+# завершении, поэтому ставится и снимается в потоке event loop (не to_thread).
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def _kernel32() -> Any:
+    """kernel32 для SetThreadExecutionState; не Windows — None (тесты подменяют фейком)."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetThreadExecutionState.argtypes = [ctypes.c_uint32]
+    kernel32.SetThreadExecutionState.restype = ctypes.c_uint32
+    return kernel32
+
+
+def set_thread_execution_state(flags: int) -> Optional[bool]:
+    """SetThreadExecutionState(flags): None — не Windows, False — вызов не удался."""
+    kernel32 = _kernel32()
+    if kernel32 is None:
+        return None
+    return bool(kernel32.SetThreadExecutionState(flags))  # 0 — ошибка, иначе прежнее состояние
+
+
+# --- Классы ошибок циклов движка (ENGINE-ERR-CLASS) ---
+# Сторона биржи: OKX 50001 (техработы), 50013 (система занята) и те же классы
+# CCXT — 50004 (таймаут эндпоинта, RequestTimeout) и 50026 (системная ошибка,
+# ExchangeNotAvailable). 50011 (rate limit) — наша частота запросов: internal.
+EXCHANGE_SIDE_CODES = frozenset({"50001", "50004", "50013", "50026"})
+# Текст HTTP-ошибки CCXT: "okx GET https://… 503 Service Unavailable <тело>"
+_HTTP_STATUS_RE = re.compile(r"^\S+ (?:GET|POST|PUT|DELETE|PATCH) \S+ (\d{3})\b")
+
+
+def http_status(exc: BaseException) -> Optional[int]:
+    """HTTP-статус ответа из исключения CCXT (текст или requests.HTTPError в __cause__)."""
+    match = _HTTP_STATUS_RE.search(str(exc))
+    if match:
+        return int(match.group(1))
+    status = getattr(getattr(exc.__cause__, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def classify_error(exc: BaseException) -> str:
+    """'exchange' — сбой биржи или сети, 'internal' — всё остальное.
+
+    Порядок: HTTP 5xx → код OKX (EXCHANGE_SIDE_CODES — exchange, любой другой —
+    internal) → HTTP 4xx → класс: таймауты и обрывы соединения CCXT и Python —
+    exchange, кроме rate limit и nonce (наша сторона). Неизвестное — internal:
+    лишняя тревога лучше пропущенной ошибки кода.
+    """
+    status = http_status(exc)
+    if status is not None and 500 <= status <= 599:
+        return "exchange"
+    code = extract_error_code(exc) if isinstance(exc, ccxt.BaseError) else None
+    if code in EXCHANGE_SIDE_CODES:
+        return "exchange"
+    if code or status is not None:
+        return "internal"
+    if isinstance(exc, (ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.InvalidNonce)):
+        return "internal"
+    if isinstance(exc, (ccxt.NetworkError, TimeoutError, ConnectionError)):
+        return "exchange"
+    return "internal"
 
 
 def read_flag_text(path: Path) -> str:
@@ -131,7 +211,13 @@ class TradingEngine:
         self._reconcile_interval = 60.0  # сек; заодно продлевает жизнь live-ключа (14 дней)
         self._equity_interval = 300.0
         self._tickers: dict[str, dict] = {}
-        self.stats = {"started_at": None, "reconciles": 0, "divergences": 0, "errors": 0}
+        # errors = errors_exchange + errors_internal (поле сохранено для совместимости)
+        self.stats = {"started_at": None, "reconciles": 0, "divergences": 0, "errors": 0,
+                      "errors_exchange": 0, "errors_internal": 0, "pauses": 0}
+        # Часы детектора пауз — настенные: они идут и во сне машины, а
+        # монотонные на Windows сон могут не учитывать (asyncio.sleep тоже)
+        self._clock = time.time
+        self._keep_awake = False
 
     # --- Жизненный цикл ---
 
@@ -139,8 +225,9 @@ class TradingEngine:
         self.stats["started_at"] = time.time()
         log.info("Starting engine (mode=%s, domain=%s, inst=%s)",
                  self.settings.mode, self.settings.domain, ",".join(self.inst_ids))
+        self._acquire_keep_awake()
 
-        drift = await asyncio.to_thread(check_time_sync, self.ex)
+        drift =await asyncio.to_thread(check_time_sync, self.ex)
         log.info("Time drift: %+d ms", drift)
         await asyncio.to_thread(self.ex.load_markets)
         await self._log_account_mode()
@@ -182,8 +269,42 @@ class TradingEngine:
             # OrderRouter.close) и WAL-чекпойнт хранилища перед выходом
             # (ENGINE-STORAGE-CLOSE; Storage.close идемпотентен)
             unregister_kill_callback(self._cancel_all_for_kill_switch)
+            self._release_keep_awake()  # не бросает исключений
             self.db.close()
         log.info("Engine stopped. Stats: %s", self.stats)
+
+    def _acquire_keep_awake(self) -> None:
+        """Windows: запрет сна системы на время работы движка (ENGINE-KEEPAWAKE)."""
+        try:
+            ok = set_thread_execution_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        except Exception as exc:  # сон — не повод не запускать сверку и kill-switch
+            log.warning("Запрет сна Windows не включён: %s", exc)
+            return
+        if ok is None:
+            return  # не Windows — ничего не делаем
+        if ok:
+            self._keep_awake = True
+            log.info("Запрет сна Windows включён: SetThreadExecutionState(ES_CONTINUOUS | "
+                     "ES_SYSTEM_REQUIRED), экран может гаснуть; снимается при остановке движка")
+        else:
+            log.warning("Запрет сна Windows не включён: SetThreadExecutionState вернул 0 — "
+                        "машина может уснуть, движок встанет")
+
+    def _release_keep_awake(self) -> None:
+        """Снять запрет сна: SetThreadExecutionState(ES_CONTINUOUS). Только если ставили."""
+        if not self._keep_awake:
+            return
+        try:
+            ok = set_thread_execution_state(ES_CONTINUOUS)
+        except Exception as exc:
+            log.warning("Запрет сна Windows не снят: %s (снимется при выходе процесса)", exc)
+            return
+        self._keep_awake = False
+        if ok:
+            log.info("Запрет сна Windows снят: SetThreadExecutionState(ES_CONTINUOUS)")
+        else:
+            log.warning("Запрет сна Windows не снят: SetThreadExecutionState вернул 0 "
+                        "(снимется при выходе процесса)")
 
     async def subscribe_market_data(self, channel: str, inst_id: str) -> None:
         """Подписка на публичный канал маркет-данных.
@@ -227,13 +348,32 @@ class TradingEngine:
     # --- Периодические задачи ---
 
     async def _reconcile_loop(self) -> None:
+        last = self._clock()
         while self._running:
             await asyncio.sleep(self._reconcile_interval)
+            now = self._clock()
+            self._check_pause(now - last)
+            last = now
             try:
                 await self._reconcile()
             except Exception as e:
-                self.stats["errors"] += 1
-                log.error("Reconcile error: %s", e)
+                kind = self._count_error(e)
+                log.error("Reconcile error (%s): %s", kind, e)
+
+    def _check_pause(self, gap: float) -> None:
+        """ENGINE-PAUSE-DETECT: между сверками больше двух интервалов — процесс стоял."""
+        if gap > 2 * self._reconcile_interval:
+            self.stats["pauses"] += 1
+            log.warning("пауза процесса %.0f с: между сверками больше двух интервалов (%.0f с) — "
+                        "сон машины или зависание процесса; пауз всего %d",
+                        gap, 2 * self._reconcile_interval, self.stats["pauses"])
+
+    def _count_error(self, exc: BaseException) -> str:
+        """ENGINE-ERR-CLASS: учесть ошибку цикла в errors_exchange или errors_internal."""
+        kind = classify_error(exc)
+        self.stats[f"errors_{kind}"] += 1
+        self.stats["errors"] = self.stats["errors_exchange"] + self.stats["errors_internal"]
+        return kind
 
     async def _reconcile(self) -> None:
         """Сверка состояния с биржей; расхождения = WS что-то пропустил."""
@@ -268,8 +408,8 @@ class TradingEngine:
             try:
                 await self._update_equity()
             except Exception as e:
-                self.stats["errors"] += 1
-                log.error("Equity error: %s", e)
+                kind = self._count_error(e)
+                log.error("Equity error (%s): %s", kind, e)
 
     async def _update_equity(self) -> None:
         """Equity = totalEq аккаунта (USD), а не только USDT-баланс."""

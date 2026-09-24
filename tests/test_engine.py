@@ -1,12 +1,18 @@
-"""Движок (src/engine.py): флаги, kill-switch, закрытие хранилища, tdMode спота.
+"""Движок (src/engine.py): флаги, kill-switch, закрытие хранилища, tdMode спота,
+запрет сна Windows, паузы процесса, классы ошибок.
 
-Задачи ENGINE-FLAG-LOG, ENGINE-KILL-REG, ENGINE-STORAGE-CLOSE, ENGINE-TDMODE.
+Задачи ENGINE-FLAG-LOG, ENGINE-KILL-REG, ENGINE-STORAGE-CLOSE, ENGINE-TDMODE,
+ENGINE-KEEPAWAKE, ENGINE-PAUSE-DETECT, ENGINE-ERR-CLASS.
 Без сети: настройки и биржа подменяются фейками, WS-клиенты не подключаются,
 риск-ядро и хранилище — во временной директории, реестр kill-switch
 восстанавливается после теста.
 """
 import asyncio
+import contextlib
+import io
+import json
 import logging
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +22,7 @@ from unittest import mock
 import ccxt
 
 from src import engine as engine_mod
-from src import order_owner, risk
+from src import ops, order_owner, risk
 from src.connector import registered_kill_callbacks, unregister_kill_callback
 from src.engine import ACCOUNT_MODE_TTL_S, RiskRejected, read_flag_text
 from src.order_router import OrderRouter
@@ -406,6 +412,265 @@ class SpotTdModeTest(_EngineCase):
         with self.assertLogs("okx.engine", level="WARNING") as cm:
             asyncio.run(bad._log_account_mode())  # не бросает: сверка и equity работают без режима
         self.assertTrue(any("не прочитан" in line for line in cm.output), cm.output)
+
+
+class FakeKernel32:
+    """kernel32 без ОС: SetThreadExecutionState запоминает флаги."""
+
+    def __init__(self, result: int = 0x80000000):
+        self.calls: list[int] = []
+        self.result = result
+
+    def SetThreadExecutionState(self, flags):  # noqa: N802 — имя функции WinAPI
+        self.calls.append(flags)
+        return self.result
+
+
+class KeepAwakeTest(_EngineCase):
+    """ENGINE-KEEPAWAKE: запрос при старте, снятие в stop(), на других ОС — ничего."""
+
+    ES_DISPLAY_REQUIRED = 0x00000002
+
+    def run_start_stop(self, kernel32):
+        eng = self.make_engine(FakeBotExchange())
+        with mock.patch.object(engine_mod, "_kernel32", return_value=kernel32), \
+                mock.patch.object(engine_mod, "check_time_sync", side_effect=RuntimeError("стоп теста")), \
+                self.assertLogs("okx.engine", level="INFO") as cm:
+            with self.assertRaisesRegex(RuntimeError, "стоп теста"):
+                asyncio.run(eng.start())  # запрет сна — до первого обращения к бирже
+            asyncio.run(eng.stop())  # как main(): stop() в finally
+        return eng, cm.output
+
+    def test_start_requests_system_and_stop_releases(self):
+        k32 = FakeKernel32()
+        eng, logs = self.run_start_stop(k32)
+        self.assertEqual(k32.calls, [engine_mod.ES_CONTINUOUS | engine_mod.ES_SYSTEM_REQUIRED,
+                                     engine_mod.ES_CONTINUOUS])
+        self.assertEqual(k32.calls[0], 0x80000001)
+        self.assertFalse(k32.calls[0] & self.ES_DISPLAY_REQUIRED, "экран должен гаснуть")
+        self.assertTrue(any("Запрет сна Windows включён" in line for line in logs), logs)
+        self.assertTrue(any("Запрет сна Windows снят" in line for line in logs), logs)
+        self.assertFalse(eng._keep_awake)
+
+    def test_not_windows_does_nothing(self):
+        eng, logs = self.run_start_stop(None)
+        self.assertFalse(any("сна" in line for line in logs), logs)
+        self.assertFalse(eng._keep_awake)
+
+    def test_failed_request_warns_and_is_not_released(self):
+        k32 = FakeKernel32(result=0)
+        _, logs = self.run_start_stop(k32)
+        self.assertEqual(k32.calls, [0x80000001])  # снимать нечего
+        self.assertTrue(any("WARNING" in line and "не включён" in line for line in logs), logs)
+
+    def test_platform_switch(self):
+        with mock.patch.object(engine_mod.sys, "platform", "linux"):
+            self.assertIsNone(engine_mod._kernel32())
+            self.assertIsNone(engine_mod.set_thread_execution_state(engine_mod.ES_CONTINUOUS))
+
+    @unittest.skipUnless(sys.platform == "win32", "только Windows")
+    def test_real_kernel32_signature(self):
+        # настоящий вызов в потоке теста: поставить и сразу снять
+        self.assertTrue(engine_mod.set_thread_execution_state(0x80000001))
+        self.assertTrue(engine_mod.set_thread_execution_state(engine_mod.ES_CONTINUOUS))
+
+
+class _Clock:
+    def __init__(self, times):
+        self.times = list(times)
+
+    def __call__(self) -> float:
+        return self.times.pop(0)
+
+
+class PauseDetectTest(_EngineCase):
+    """ENGINE-PAUSE-DETECT: между сверками больше двух интервалов — WARNING и pauses += 1."""
+
+    def run_reconcile_loop(self, eng, times, cycles):
+        eng._clock = _Clock(times)
+        eng._reconcile_interval = 0.001  # настоящие сны короткие, время задают часы
+        done = []
+
+        async def fake_reconcile():
+            done.append(1)
+            if len(done) >= cycles:
+                eng._running = False
+
+        eng._reconcile = fake_reconcile
+        eng._running = True
+        asyncio.run(asyncio.wait_for(eng._reconcile_loop(), timeout=10))
+
+    def test_pause_on_fake_clock(self):
+        eng = self.make_engine(FakeBotExchange())
+        with self.assertLogs("okx.engine", level="WARNING") as cm:
+            # старт 1000; +0.001 — норма; +500 — пауза; +0.001 — норма
+            self.run_reconcile_loop(eng, [1000.0, 1000.001, 1500.001, 1500.002], cycles=3)
+        self.assertEqual(eng.stats["pauses"], 1)
+        pause_logs = [line for line in cm.output if "пауза процесса" in line]
+        self.assertEqual(len(pause_logs), 1, cm.output)
+        self.assertIn("пауза процесса 500 с", pause_logs[0])
+        eng._save_stats()
+        self.assertEqual(eng.db.get_ws_state("engine_stats")["pauses"], 1)
+
+    def test_threshold_is_two_intervals(self):
+        eng = self.make_engine(FakeBotExchange())
+        eng._reconcile_interval = 60.0
+        eng._check_pause(120.0)  # ровно два интервала — ещё не пауза
+        self.assertEqual(eng.stats["pauses"], 0)
+        with self.assertLogs("okx.engine", level="WARNING"):
+            eng._check_pause(121.0)
+        self.assertEqual(eng.stats["pauses"], 1)
+
+    def test_wall_clock_by_default(self):
+        eng = self.make_engine(FakeBotExchange())
+        self.assertIs(eng._clock, engine_mod.time.time)
+
+
+class _HttpError(Exception):
+    """Как requests.HTTPError: статус в response.status_code."""
+
+    def __init__(self, status: int):
+        super().__init__(f"HTTP {status}")
+        self.response = SimpleNamespace(status_code=status)
+
+
+def _chained(exc: BaseException, cause: BaseException) -> BaseException:
+    exc.__cause__ = cause
+    return exc
+
+
+URL = "https://www.okx.com/api/v5/account/balance"
+
+
+class ClassifyErrorTest(unittest.TestCase):
+    """ENGINE-ERR-CLASS: классы ошибок по коду OKX, HTTP-статусу и классу CCXT."""
+
+    EXCHANGE = [
+        ccxt.OnMaintenance('okx {"code":"50001","msg":"Service temporarily unavailable","data":[]}'),
+        ccxt.ExchangeNotAvailable('okx {"code":"50013","msg":"Systems are busy","data":[]}'),
+        ccxt.RequestTimeout('okx {"code":"50004","msg":"Endpoint request timeout","data":[]}'),
+        ccxt.ExchangeNotAvailable('okx {"code":"50026","msg":"System error","data":[]}'),
+        ccxt.ExchangeNotAvailable(f"okx GET {URL} 503 Service Unavailable <html>ray 12345</html>"),
+        ccxt.ExchangeNotAvailable(f"okx POST {URL} 502 Bad Gateway "),
+        ccxt.RequestTimeout(f"okx GET {URL} 504 Gateway Timeout "),
+        _chained(ccxt.ExchangeError(f"okx GET {URL}"), _HttpError(505)),  # 5xx без маппинга CCXT
+        ccxt.RequestTimeout(f"okx GET {URL}"),  # requests Timeout
+        ccxt.NetworkError(f"okx GET {URL}"),  # обрыв соединения
+        TimeoutError("read timeout"),
+        ConnectionResetError(10054, "connection reset"),
+    ]
+    INTERNAL = [
+        ccxt.RateLimitExceeded('okx {"code":"50011","msg":"Too Many Requests","data":[]}'),
+        ccxt.RateLimitExceeded(f"okx GET {URL} 429 Too Many Requests "),
+        ccxt.AuthenticationError('okx {"code":"50113","msg":"Invalid Sign","data":[]}'),
+        ccxt.InvalidNonce('okx {"code":"50102","msg":"Timestamp request expired","data":[]}'),
+        ccxt.ExchangeNotAvailable(f"okx GET {URL} 403 Forbidden "),  # CCXT маппит 4xx в NotAvailable
+        ccxt.BadRequest('okx {"code":"51000","msg":"Parameter tdMode error","data":[]}'),
+        ccxt.ExchangeError(f"okx GET {URL}"),  # SSL, редиректы — без статуса
+        KeyError("totalEq"),
+        ValueError("could not convert string to float"),
+        RuntimeError("Дрейф часов 40000 мс"),
+    ]
+
+    def test_exchange_side(self):
+        for exc in self.EXCHANGE:
+            with self.subTest(exc=repr(exc)):
+                self.assertEqual(engine_mod.classify_error(exc), "exchange")
+
+    def test_internal(self):
+        for exc in self.INTERNAL:
+            with self.subTest(exc=repr(exc)):
+                self.assertEqual(engine_mod.classify_error(exc), "internal")
+
+
+class ErrorCountersTest(_EngineCase):
+    """ENGINE-ERR-CLASS: счётчики в циклах, errors = сумма, всё в engine_stats."""
+
+    def run_equity_loop(self, eng, errors):
+        eng._equity_interval = 0.001
+        queue = list(errors)
+
+        async def fake_update():
+            if not queue:
+                eng._running = False
+                return
+            raise queue.pop(0)
+
+        eng._update_equity = fake_update
+        eng._running = True
+        asyncio.run(asyncio.wait_for(eng._equity_loop(), timeout=10))
+
+    def test_equity_loop_splits_counters(self):
+        eng = self.make_engine(FakeBotExchange())
+        with self.assertLogs("okx.engine", level="ERROR") as cm:
+            self.run_equity_loop(eng, [
+                ccxt.RequestTimeout(f"okx GET {URL}"),
+                ccxt.RateLimitExceeded('okx {"code":"50011","msg":"Too Many Requests"}'),
+                KeyError("totalEq"),
+            ])
+        self.assertEqual((eng.stats["errors_exchange"], eng.stats["errors_internal"], eng.stats["errors"]),
+                         (1, 2, 3))
+        self.assertTrue(any("Equity error (exchange)" in line for line in cm.output), cm.output)
+        eng._save_stats()
+        saved = eng.db.get_ws_state("engine_stats")
+        self.assertEqual((saved["errors_exchange"], saved["errors_internal"], saved["errors"], saved["pauses"]),
+                         (1, 2, 3, 0))
+
+    def test_reconcile_loop_counts_exchange_error(self):
+        eng = self.make_engine(FakeBotExchange())
+        eng._reconcile_interval = 0.001
+        calls = []
+
+        async def fake_reconcile():
+            calls.append(1)
+            if len(calls) >= 2:
+                eng._running = False
+            raise ccxt.ExchangeNotAvailable(f"okx GET {URL} 503 Service Unavailable ")
+
+        eng._reconcile = fake_reconcile
+        eng._running = True
+        with self.assertLogs("okx.engine", level="ERROR"):
+            asyncio.run(asyncio.wait_for(eng._reconcile_loop(), timeout=10))
+        self.assertEqual((eng.stats["errors_exchange"], eng.stats["errors_internal"], eng.stats["errors"]),
+                         (2, 0, 2))
+
+
+class OpsStatusEngineTest(unittest.TestCase):
+    """`python -m src.ops status`: errors_exchange, errors_internal, pauses у движка."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.addCleanup(risk.init, root / "unused.db")
+        self.paths = SimpleNamespace(risk_db=root / "risk.db", bot_db=root / "bot.db")
+        patcher = mock.patch.object(ops, "state_paths", return_value=self.paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def status(self, stats):
+        if stats is not None:
+            Storage(self.paths.bot_db).set_ws_state("engine_stats", stats)
+        out = io.StringIO()
+        # basicConfig из ops.main не должен вешать обработчик на root для остальных тестов
+        with contextlib.redirect_stdout(out), mock.patch("logging.basicConfig"):
+            self.assertEqual(ops.main(["status", "--mode", "demo"]), 0)
+        return json.loads(out.getvalue())["engine"]
+
+    def test_new_counters_shown(self):
+        engine = self.status({"errors": 3, "errors_exchange": 1, "errors_internal": 2, "pauses": 1})
+        self.assertEqual((engine["errors_exchange"], engine["errors_internal"], engine["errors"],
+                          engine["pauses"]), (1, 2, 3, 1))
+
+    def test_old_engine_stats_show_null(self):
+        engine = self.status({"errors": 5, "reconciles": 10})
+        self.assertEqual(engine["errors"], 5)
+        self.assertIsNone(engine["errors_exchange"])
+        self.assertIsNone(engine["errors_internal"])
+        self.assertIsNone(engine["pauses"])
+
+    def test_no_engine_stats(self):
+        self.assertIsNone(self.status(None))
 
 
 if __name__ == "__main__":
