@@ -231,16 +231,33 @@ class EquityFreshnessTest(_RiskCase):
         self.assertIn("глобальный", reason)
 
 
-class DcaEquityFeedTest(_RiskCase):
-    """DCABot при equity = None (баланс не прочитан): вход решает свежесть equity в ядре."""
+class EquityFeedConsumersTest(_RiskCase):
+    """OrderRouter и DCABot при устаревшем equity ордер не ставят.
+
+    DCABot при equity = None (баланс не прочитан) update_equity не зовёт: вход
+    решает свежесть equity в общем риск-состоянии, кто бы её ни выставил.
+    """
+
+    def _router(self, ex: FakeExchange) -> OrderRouter:
+        router = OrderRouter(ex, db_path=Path(self._tmp.name) / "bot.db")
+        self.addCleanup(router.close)
+        return router
 
     def _run_bot(self) -> tuple[str, FakeExchange]:
         ex = FakeExchange()
-        router = OrderRouter(ex, db_path=Path(self._tmp.name) / "bot.db")
-        self.addCleanup(router.close)
+        router = self._router(ex)
         bot = DCABot(ex, router, max_buys=1, interval_sec=0, demo=True, storage=router.storage,
                      equity_fn=lambda: None, sleep=lambda s: None)
         return bot.run(), ex
+
+    def test_router_rejects_order_on_stale_equity(self):
+        ex = FakeExchange()
+        risk.update_equity(10_000)
+        self.tick(risk.EQUITY_MAX_AGE_S + 1)
+        result = self._router(ex).place_order("BTC/USDT", "buy", "limit", px=30_000.0, sz=0.001)
+        self.assertEqual((result["ok"], result["stage"]), (False, "check_entry_allowed"))
+        self.assertIn("устарела", result["reason"])
+        self.assertEqual(ex.created, [])
 
     def test_no_equity_ever_pauses_without_orders(self):
         final, ex = self._run_bot()
