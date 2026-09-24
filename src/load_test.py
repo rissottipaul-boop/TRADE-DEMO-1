@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import ccxt
 
 from . import order_owner
+from .account_mode import check_no_borrow, fetch_account_mode, spot_order_params
 from .config import load_settings
 from .connector import (
     create_exchange,
@@ -135,6 +136,16 @@ def run(cycles: int) -> tuple[int, Stats, dict]:
     log.info("Рынок %.1f -> лимит %.1f (-40%%), размер %.8f BTC (~%.1f USDT)",
              market, price, amount, price * amount)
 
+    # tdMode спота по режиму аккаунта и без займа (SPOT-TDMODE, src/account_mode.py);
+    # ордер в каждый момент один — проверки на первом достаточно
+    acct = fetch_account_mode(ex)
+    ok, reason = check_no_borrow(ex, acct, SYMBOL, "buy", "limit", amount, price)
+    if not ok:
+        log.error("Тест не запускаю: %s", reason)
+        return 1, stats, {}
+    spot_params = spot_order_params(acct, "limit", "buy", amount, price)
+    log.info("Режим аккаунта: acctLv=%s (%s), tdMode спота %s", acct.acct_lv, acct.name, acct.spot_td_mode)
+
     started_all = time.perf_counter()
     for i in range(1, cycles + 1):
         cl_ord_id = order_owner.new_cl_ord_id(CL_PREFIX)
@@ -143,7 +154,7 @@ def run(cycles: int) -> tuple[int, Stats, dict]:
             order, lat = _call_with_backoff(
                 lambda: ex.create_limit_buy_order(
                     SYMBOL, amount, price,
-                    params={"clOrdId": cl_ord_id, "expTime": exp_time_ms(30_000)},
+                    params={**spot_params, "clOrdId": cl_ord_id, "expTime": exp_time_ms(30_000)},
                 ),
                 stats, "place",
             )

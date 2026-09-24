@@ -71,6 +71,9 @@ class FakeExchange:
     def fetch_order(self, order_id, symbol=None):
         return {"id": order_id, "status": "closed", "symbol": symbol}
 
+    def private_get_account_config(self, params=None):  # режим аккаунта для tdMode (SPOT-TDMODE)
+        return {"code": "0", "data": [{"acctLv": "1", "autoLoan": False}]}
+
 
 def make_bot(exchange: FakeExchange, max_buys: int) -> DCABot:
     router = OrderRouter(exchange, db_path=TEST_STATE_DB)
