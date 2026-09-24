@@ -41,9 +41,25 @@ algo-ордеров + остановка grid- и DCA-ботов); после о
 
 Демо-принцип: роутер принимает готовый exchange-объект (см. connector.py),
 сам ключи и .env не читает.
+
+Выход из позиции (ROUTER-EXIT): place_exit_order — отдельный метод, НЕ вход.
+В отличие от place_order он не проходит risk.check_entry_allowed (хедж, лимит
+входов/день, breaker'ы, свежесть equity — по регламенту в аварии выходы
+обязаны проходить, AGENTS.md §2), а ищет позицию в risk.open_position — том
+же слоте risk_open_risk, что занимает register_entry при входе. Нет записи —
+выход отклонён (метка «выход» сама по себе не должна открывать позицию,
+о которой риск-ядро не знает); сторона обязана быть противоположна стороне
+позиции, sz — не больше её остатка (иначе отказ: так выход не может открыть
+или нарастить позицию под своим именем); для деривативов (не спот) —
+reduceOnly=True вторым рубежом на стороне биржи. Проверки ордера, а не
+входа (tdMode/запрет займа по режиму аккаунта, throttler, expTime, clOrdId
+с меткой владельца), выход проходит наравне со входом. По исполнении выход
+освобождает слот через risk.release_position, а не занимает его через
+risk.register_entry.
 """
 import json
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -84,6 +100,10 @@ ACCOUNT_MODE_TTL_S = 300.0
 
 # CCXT unified side -> сторона позиции для risk.validate_stop_vs_liquidation
 _SIDE_TO_POSITION = {"buy": "long", "sell": "short"}
+
+# Выход обязан идти противоположной стороной относительно зарегистрированной
+# позиции (ROUTER-EXIT) — иначе это не выход, а вход/наращивание под чужой меткой
+_OPPOSITE_SIDE = {"buy": "sell", "sell": "buy"}
 
 
 class _PlaceThrottler:
