@@ -112,15 +112,9 @@ class _RiskCore:
                     inst_id TEXT PRIMARY KEY,
                     side TEXT NOT NULL,
                     risk_pct REAL NOT NULL,
-                    opened_at REAL NOT NULL,
-                    sz REAL
+                    opened_at REAL NOT NULL
                 );
             """)
-            # Миграция для БД, созданных до ROUTER-EXIT: добавить sz, если её нет —
-            # таблицу не пересоздаём, занятые слоты не теряем (AGENTS.md §6).
-            cols = {r["name"] for r in conn.execute("PRAGMA table_info(risk_open_risk)")}
-            if "sz" not in cols:
-                conn.execute("ALTER TABLE risk_open_risk ADD COLUMN sz REAL")
 
     # --- Скалярное состояние ---
 
@@ -310,24 +304,14 @@ class _RiskCore:
                             detail=f"side={side} entry={entry} stop={stop} liq={liq_price}")
         return ok
 
-    def register_entry(self, inst_id: str, side: str, risk_pct: float = DEFAULT_RISK_PCT,
-                       sz: Optional[float] = None) -> None:
-        """Фиксация открытой позиции: portfolio heat + счётчик входов/день.
-
-        sz (ROUTER-EXIT) — размер входа, если вызывающий его знает (роутер
-        передаёт всегда): это остаток позиции, с которым сверяется выход
-        (release_position) — выход не может закрыть больше, чем сюда
-        зарегистрировал вход. None — размер не отслеживается (например,
-        грид: insights/grid-strategy-design.md §6.2) — такую позицию
-        release_position закроет только целиком.
-        """
+    def register_entry(self, inst_id: str, side: str, risk_pct: float = DEFAULT_RISK_PCT) -> None:
+        """Фиксация открытой позиции: portfolio heat + счётчик входов/день."""
         with self._lock:
             self._maybe_rollover_day()
             with self._conn() as conn:
                 conn.execute(
-                    "INSERT OR REPLACE INTO risk_open_risk (inst_id, side, risk_pct, opened_at, sz) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (inst_id, side, risk_pct, _utc_now(), sz),
+                    "INSERT OR REPLACE INTO risk_open_risk VALUES (?, ?, ?, ?)",
+                    (inst_id, side, risk_pct, _utc_now()),
                 )
             self._set("entries_today", self._get("entries_today") + 1)
 
@@ -352,60 +336,6 @@ class _RiskCore:
             self._log_event("spot_buy", inst_id=inst_id,
                             detail=f"доливка спот-позиции, слот риска освобождён "
                                    f"(удалено записей: {cur.rowcount})")
-
-    def open_position(self, inst_id: str) -> Optional[dict]:
-        """Открытая позиция по inst_id из risk_open_risk, или None (ROUTER-EXIT).
-
-        Тот же слот, что занимает register_entry: сторона, риск в % и остаток
-        размера (sz — None, если вход зарегистрирован без него). Выход
-        роутера сверяется с этой записью, а не с биржей напрямую: без неё
-        позиция для риск-ядра не существует, и выход отклоняется — метка
-        «выход» сама по себе не должна открывать позицию, о которой риск-ядро
-        не знает.
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT inst_id, side, risk_pct, sz, opened_at FROM risk_open_risk WHERE inst_id=?",
-                (inst_id,),
-            ).fetchone()
-        return dict(row) if row else None
-
-    def release_position(self, inst_id: str, sz: Optional[float] = None) -> Optional[dict]:
-        """Освободить слот risk_open_risk после ВЫХОДА (ROUTER-EXIT) — не входа.
-
-        sz не задан, >= сохранённого остатка или остаток неизвестен —
-        позиция закрыта полностью, запись удаляется. sz строго меньше
-        остатка — частичный выход: остаток уменьшается, слот остаётся занят
-        тем же inst_id (портфельный хедж всё ещё запрещён, пока позиция не
-        закрыта целиком). Нет записи для inst_id — no-op (None).
-
-        Реализованный PnL сделки и его последствия (day_pnl, серии убытков,
-        блокировка инструмента) сюда не входят — это забота record_pnl по
-        факту закрытия, отдельная от освобождения слота.
-        """
-        with self._lock:
-            with self._conn() as conn:
-                row = conn.execute(
-                    "SELECT inst_id, side, risk_pct, sz, opened_at FROM risk_open_risk WHERE inst_id=?",
-                    (inst_id,),
-                ).fetchone()
-                if row is None:
-                    return None
-                remaining = row["sz"]
-                partial = (sz is not None and remaining is not None and sz < remaining
-                          and not math.isclose(sz, remaining, rel_tol=1e-9, abs_tol=1e-12))
-                result = dict(row)
-                if partial:
-                    new_remaining = remaining - sz
-                    conn.execute("UPDATE risk_open_risk SET sz=? WHERE inst_id=?",
-                                (new_remaining, inst_id))
-                    result["sz"] = new_remaining
-                    detail = f"частичный выход sz={sz:g}, остаток {remaining:g} -> {new_remaining:g}"
-                else:
-                    conn.execute("DELETE FROM risk_open_risk WHERE inst_id=?", (inst_id,))
-                    detail = f"позиция закрыта полностью: выход sz={sz!r}, остаток был {remaining!r}"
-            self._log_event("position_released", inst_id=inst_id, detail=detail)
-            return result
 
     def record_pnl(self, inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
         """Результат закрытой сделки: дневной PnL, серии убытков, блокировки, пауза.
@@ -569,7 +499,7 @@ class _RiskCore:
             updated_at = self._get("equity_updated_at")
             with self._conn() as conn:
                 open_risk = [dict(r) for r in conn.execute(
-                    "SELECT inst_id, side, risk_pct, sz FROM risk_open_risk").fetchall()]
+                    "SELECT inst_id, side, risk_pct FROM risk_open_risk").fetchall()]
                 instruments = [dict(r) for r in conn.execute(
                     "SELECT inst_id, loss_streak, blocked_until FROM risk_instruments").fetchall()]
             return {
@@ -685,9 +615,8 @@ def update_equity(equity: float) -> list[str]:
     return _c().update_equity(equity)
 
 
-def register_entry(inst_id: str, side: str, risk_pct: float = DEFAULT_RISK_PCT,
-                   sz: Optional[float] = None) -> None:
-    _c().register_entry(inst_id, side, risk_pct, sz)
+def register_entry(inst_id: str, side: str, risk_pct: float = DEFAULT_RISK_PCT) -> None:
+    _c().register_entry(inst_id, side, risk_pct)
 
 
 def register_spot_buy(inst_id: str) -> None:
@@ -695,20 +624,6 @@ def register_spot_buy(inst_id: str) -> None:
     на серии убытков, day_pnl и equity. Счётчик entries_today учитывает покупку
     через register_entry в OrderRouter."""
     _c().register_spot_buy(inst_id)
-
-
-def open_position(inst_id: str) -> Optional[dict]:
-    """Открытая позиция по inst_id (тот слот, что занимает register_entry) или None (ROUTER-EXIT)."""
-    return _c().open_position(inst_id)
-
-
-def release_position(inst_id: str, sz: Optional[float] = None) -> Optional[dict]:
-    """Освободить слот risk_open_risk после выхода — НЕ входа (ROUTER-EXIT).
-
-    Полный выход (sz не задан, >= остатка или остаток неизвестен) удаляет
-    запись; частичный — уменьшает сохранённый sz, слот остаётся занят тем
-    же inst_id."""
-    return _c().release_position(inst_id, sz)
 
 
 def status() -> dict:
