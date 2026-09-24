@@ -398,7 +398,9 @@ def run_cli(argv, exchange=None, env_mode="demo"):
     with mock.patch.object(account_mode, "_exchange", factory), \
             mock.patch.object(account_mode, "CONFIRM_DELAY_S", 0), \
             mock.patch.dict(os.environ, {"OKX_MODE": env_mode}), \
+            mock.patch("logging.basicConfig"), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # basicConfig отключён: иначе корневой логгер остался бы привязан к этому StringIO
         try:
             code = account_mode.main(argv)
         except SystemExit as exc:  # argparse: неверный аргумент — выход 2 до сети
