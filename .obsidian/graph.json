@@ -6,7 +6,36 @@
   "hideUnresolved": true,
   "showOrphans": true,
   "collapse-color-groups": false,
-  "colorGroups": [],
+  "colorGroups": [
+    {
+      "query": "path:insights",
+      "color": {
+        "a": 1,
+        "rgb": 3900150
+      }
+    },
+    {
+      "query": "path:ops",
+      "color": {
+        "a": 1,
+        "rgb": 16347926
+      }
+    },
+    {
+      "query": "path:notes",
+      "color": {
+        "a": 1,
+        "rgb": 2278750
+      }
+    },
+    {
+      "query": "file:Home OR file:AGENTS OR file:README",
+      "color": {
+        "a": 1,
+        "rgb": 15381256
+      }
+    }
+  ],
   "collapse-display": false,
   "showArrow": true,
   "textFadeMultiplier": 1.1,
@@ -17,6 +46,6 @@
   "repelStrength": 8.38634146341463,
   "linkStrength": 1,
   "linkDistance": 250,
-  "scale": 0.3628873693012111,
+  "scale": 0.20769625540972123,
   "close": true
 }

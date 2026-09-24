@@ -27,3 +27,7 @@ logs/
 
 # Ignore Smart Environment folder
 .smart-env
+# Obsidian: раскладка окон и корзина — личное, меняется на каждый клик
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.trash/

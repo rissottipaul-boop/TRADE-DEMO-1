@@ -3,5 +3,7 @@
   "theme": "obsidian",
   "cssTheme": "Adrenaline",
   "interfaceFontFamily": "Franklin Gothic Medium,Ebrima",
-  "enabledCssSnippets": []
+  "enabledCssSnippets": [
+    "project"
+  ]
 }

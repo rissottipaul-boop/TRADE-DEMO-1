@@ -1,0 +1,71 @@
+{
+  "items": [
+    {
+      "type": "file",
+      "ctime": 1790286162993,
+      "path": "Home.md",
+      "title": "Пульт"
+    },
+    {
+      "type": "file",
+      "ctime": 1790286162993,
+      "path": "ops/board.md",
+      "title": "Доска"
+    },
+    {
+      "type": "file",
+      "ctime": 1790286162993,
+      "path": "ops/incidents.md",
+      "title": "Инциденты"
+    },
+    {
+      "type": "file",
+      "ctime": 1790286162993,
+      "path": "AGENTS.md",
+      "title": "Регламент агентов"
+    },
+    {
+      "type": "group",
+      "ctime": 1790286162993,
+      "title": "План и деньги",
+      "items": [
+        {
+          "type": "file",
+          "ctime": 1790286162993,
+          "path": "insights/roadmap.md",
+          "title": "Roadmap"
+        },
+        {
+          "type": "file",
+          "ctime": 1790286162993,
+          "path": "insights/business-plan.md",
+          "title": "План заработка"
+        },
+        {
+          "type": "file",
+          "ctime": 1790286162993,
+          "path": "insights/risk-core.md",
+          "title": "Риск-ядро"
+        },
+        {
+          "type": "file",
+          "ctime": 1790286162993,
+          "path": "insights/phase1-progress.md",
+          "title": "Прогресс Фазы 1"
+        },
+        {
+          "type": "file",
+          "ctime": 1790286162993,
+          "path": "insights/bot-fleet-demo.md",
+          "title": "Демо-флот"
+        }
+      ]
+    },
+    {
+      "type": "search",
+      "ctime": 1790286162993,
+      "query": "path:insights \"Открытые вопросы\"",
+      "title": "Инсайты с открытыми вопросами"
+    }
+  ]
+}
