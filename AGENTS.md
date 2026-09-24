@@ -77,6 +77,7 @@
 | `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |
 | `src/pnl_ledger.py` + `ops/sleeves.json` | PnL по рукавам из bills (только чтение), отчёт за день или неделю; правила атрибуции; методика — `insights/pnl-ledger.md` |
 | `src/backtest/` | Бэктестер: загрузка свечей, событийный движок с риск-ядром, walk-forward, anti-lookahead, отчёт (`insights/backtester-design.md`) |
+| `src/pump_scanner.py` | Памп-сканер без LLM (PUMP-CODIFY): только публичные GET, закрытые 1H-свечи, фильтр скана №5; строка `scan` в `data/pump_journal.jsonl`; повтор прошлого скана `--at` |
 | Дубли консолидированы (ARCH-DEDUP): `state.py` и `ws_public.py` удалены, канон — `storage.py` + `ws_client.py` | |
 
 | Что | Команда |
@@ -92,6 +93,7 @@
 | Реестр и новый clOrdId | `python -m src.order_owner`, `python -m src.order_owner new trd` |
 | PnL по рукавам | `python -m src.pnl_ledger [--date YYYY-MM-DD] [--days 7] [--mode live]` — 0: норма, 1: есть предупреждения, 2: отчёт не построен |
 | Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей) |
+| Памп-скан (без ключей) | `python -m src.pump_scanner --exclude <базы флота> [--json] [--no-journal]`; повтор: `--at 2026-09-24T09:47+05:00 --pairs OKB-USDT …` — 0: скан выполнен, 2: ошибка данных или сети |
 
 **Метка владельца ордера (ORDER-OWNER-TAG).** Каждый ордер, algo-ордер и бот, которые ставит агент, получают clOrdId с префиксом владельца. Коды владельцев: OKX Trader `trd`, Pump Risk Taker `pmp`, Ops Sentinel `sen`, Insight Executor `iex`, Crypto Insight Hunter `hnt`.
 

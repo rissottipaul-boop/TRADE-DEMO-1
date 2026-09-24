@@ -89,8 +89,6 @@ from typing import Callable, Iterable, Optional, Sequence
 from .backtest.data import OKX_REST, OkxApiError, OkxPublicClient
 from .backtest.indicators import is_nan, macd, rsi_wilder, sma
 
-log = logging.getLogger("okx.pump_scanner")
-
 SOURCE = "src.pump_scanner"
 FORMAT_VERSION = 1
 PROJECT_TZ = timezone(timedelta(hours=5))    # время проекта (ops/board.md)
@@ -654,8 +652,11 @@ def render_text(report: dict) -> str:
     for w in report["warnings"]:
         lines.append(f"ВНИМАНИЕ: {w}")
     journal = report.get("journal")
-    lines.append("Журнал: " + (f"+1 строка scan → {journal}" if journal else
-                               "не пишется (повтор или --no-journal)"))
+    if report.get("journal_error"):
+        lines.append(f"Журнал: НЕ ЗАПИСАН — {report['journal_error']}")
+    else:
+        lines.append("Журнал: " + (f"+1 строка scan → {journal}" if journal else
+                                   "не пишется (повтор или --no-journal)"))
     lines.append("Кандидат — не сделка: вход, размер, стоп и ликвидность решает Pump Risk Taker "
                  "по pump-pocket.json.")
     return "\n".join(lines)
@@ -716,8 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None, client=None,
          now_ms: Optional[int] = None) -> int:
-    logging.basicConfig(level=logging.WARNING,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    """CLI. client и now_ms подставляют тесты (фейковая биржа, фиксированное время)."""
     parser = build_parser()
     args = parser.parse_args(argv)
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
@@ -753,6 +753,7 @@ def main(argv: Optional[list[str]] = None, client=None,
             append_journal(args.journal, journal_record(report))
         except OSError as exc:
             report["journal"] = None
+            report["journal_error"] = f"{args.journal.as_posix()}: {exc}"
             print(f"Журнал не записан ({args.journal}): {exc}", file=sys.stderr)
             code = 2
     print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else render_text(report))
@@ -760,7 +761,9 @@ def main(argv: Optional[list[str]] = None, client=None,
 
 
 if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
+    if hasattr(sys.stdout, "reconfigure"):   # ≥, ×, → в консоли Windows с cp1251
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     sys.exit(main())
