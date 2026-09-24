@@ -7,6 +7,10 @@ exchange.create_order вне этого модуля запрещены.
 1. risk.check_entry_allowed  — отказ риск-слоя => ордер НЕ выставляется;
 2. risk.size_position (если sz не задан явно) или валидация переданного sz;
 3. risk.validate_stop_vs_liquidation (если заданы stop_px и liq_price);
+3b. спот — режим аккаунта (SPOT-TDMODE, src/account_mode.py): tdMode по acctLv
+   (1–2 → cash, 3–4 → cross; режим перечитывается раз в 5 мин). Если заём
+   возможен (autoLoan в режимах 3–4 или enableSpotBorrow), ордер больше
+   availBal отклоняется до биржи. Режим или баланс не прочитаны — отказ;
 4. throttler: не более 20 place-запросов / 2 сек на инструмент
    (поверх CCXT enableRateLimit — тот про общий REST, этот про ордера);
 5. выставление через okx_call с expTime-дедлайном (защита от зависших
@@ -47,6 +51,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import order_owner, risk
+from .account_mode import AccountMode, check_no_borrow, fetch_account_mode, is_spot, spot_order_params
 from .connector import (
     emergency_stop,
     kill_switch_dispatch,
@@ -73,6 +78,9 @@ PLACE_LIMIT = 20
 PLACE_WINDOW_SEC = 2.0
 # TTL ордерного запроса по умолчанию (expTime), мс
 DEFAULT_EXP_TTL_MS = 10_000
+# Режим аккаунта перечитывается не чаще раза в 5 мин: человек может сменить его
+# на ходу (incidents.md 24.09 10:10), а account/config — 5 запросов / 2 с
+ACCOUNT_MODE_TTL_S = 300.0
 
 # CCXT unified side -> сторона позиции для risk.validate_stop_vs_liquidation
 _SIDE_TO_POSITION = {"buy": "long", "sell": "short"}
@@ -119,11 +127,16 @@ class OrderRouter:
         throttle_limit: int = PLACE_LIMIT,
         throttle_window_sec: float = PLACE_WINDOW_SEC,
         owner: str = order_owner.ROUTER,
+        account_mode: Optional[AccountMode] = None,  # None -> читать account/config (TTL)
     ) -> None:
         # Владелец clOrdId по умолчанию (ORDER-OWNER-TAG); ошибка конфигурации —
         # ValueError до любого обращения к бирже
         self.owner = order_owner.require(owner, own=True).code
         self.exchange = exchange
+        # Режим аккаунта для спота (SPOT-TDMODE): переданный — фиксирован
+        self._account_mode = account_mode
+        self._account_mode_fixed = account_mode is not None
+        self._account_mode_at = 0.0
         # Хранилище — канонический Storage (storage.py); db_path — для тестов
         self.storage = storage or Storage(db_path)
         self.db_path = self.storage.db_path
@@ -206,13 +219,19 @@ class OrderRouter:
                 log.warning("place_order ОТКЛОНЁН: %s", reason)
                 return {"ok": False, "stage": "stop_vs_liquidation", "reason": reason}
 
+        # 3b. Спот: tdMode по режиму аккаунта и запрет скрытого займа (SPOT-TDMODE)
+        mode_params, reason = self._spot_params(inst_id, side, ord_type, sz, px)
+        if mode_params is None:
+            log.warning("place_order ОТКЛОНЁН: %s", reason)
+            return {"ok": False, "stage": "account_mode", "reason": reason}
+
         # 4. Throttler ордерных запросов (поверх CCXT enableRateLimit)
         self.throttler.acquire(inst_id)
 
         # 5. Выставление с expTime-дедлайном и своим clOrdId: префикс — метка
         #    владельца, clOrdId — ключ восстановления, если ответ на place потерялся
         cl_ord_id = order_owner.new_cl_ord_id(owner_code)
-        order = self._create_order_with_exp(inst_id, ord_type, side, sz, px, cl_ord_id)
+        order = self._create_order_with_exp(inst_id, ord_type, side, sz, px, cl_ord_id, mode_params)
         exchange_order_id = order.get("id")
         log.info("ордер выставлен: %s %s %s sz=%s px=%s id=%s clOrdId=%s (владелец %s)",
                  inst_id, side, ord_type, sz, px, exchange_order_id, cl_ord_id, owner_code)
@@ -252,13 +271,49 @@ class OrderRouter:
             "sz": sz,
         }
 
+    def account_mode(self) -> AccountMode:
+        """Режим аккаунта: переданный в конструктор или account/config (кэш ACCOUNT_MODE_TTL_S)."""
+        now = time.monotonic()
+        stale = now - self._account_mode_at > ACCOUNT_MODE_TTL_S
+        if self._account_mode is None or (stale and not self._account_mode_fixed):
+            mode = okx_call(fetch_account_mode, self.exchange)
+            if self._account_mode is not None and mode != self._account_mode:
+                log.warning("режим аккаунта сменился: %s -> %s", self._account_mode, mode)
+            self._account_mode, self._account_mode_at = mode, now
+        return self._account_mode
+
+    def _spot_params(self, inst_id: str, side: str, ord_type: str, sz: float,
+                     px: Optional[float]) -> tuple[Optional[dict], str]:
+        """Параметры create_order для спота или (None, причина отказа).
+
+        Не спот — без изменений ({}): деривативы роутер пока не ставит.
+        """
+        if not is_spot(inst_id):
+            return {}, ""
+        try:
+            mode = self.account_mode()
+        except Exception as exc:  # без режима tdMode не выбрать — ордер не ставим
+            return None, f"режим аккаунта не прочитан ({exc}) — tdMode спота не выбрать"
+        try:
+            ok, reason = check_no_borrow(self.exchange, mode, inst_id, side, ord_type, sz, px)
+        except Exception as exc:
+            return None, f"availBal не прочитан ({exc}) — заём не исключить"
+        if not ok:
+            return None, reason
+        try:
+            return spot_order_params(mode, ord_type, side, sz, px), ""
+        except ValueError as exc:
+            return None, str(exc)
+
     def _create_order_with_exp(self, inst_id: str, ord_type: str, side: str,
-                               sz: float, px: Optional[float], cl_ord_id: str) -> dict:
+                               sz: float, px: Optional[float], cl_ord_id: str,
+                               extra_params: Optional[dict] = None) -> dict:
         """create_order с expTime: дедлайн и в теле запроса (params), и в заголовке.
 
         OKX принимает expTime (unix ms) как параметр place/amend — после дедлайна
         сервер отбрасывает запрос. Заголовок проставляем дополнительно и
         восстанавливаем после вызова, чтобы не тянуть его в неордерные запросы.
+        extra_params — tdMode/tgtCcy спота (SPOT-TDMODE).
         """
         now_ms = (self.exchange.milliseconds()
                   if hasattr(self.exchange, "milliseconds") else int(time.time() * 1000))
@@ -270,7 +325,7 @@ class OrderRouter:
         try:
             return okx_call(self.exchange.create_order,
                             inst_id, ord_type, side, sz, px,
-                            {"expTime": deadline, "clOrdId": cl_ord_id})
+                            {**(extra_params or {}), "expTime": deadline, "clOrdId": cl_ord_id})
         finally:
             if isinstance(headers, dict):
                 if prev is None:

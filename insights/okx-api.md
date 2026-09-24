@@ -294,6 +294,13 @@
 
     Следствие: спот через CCXT с дефолтным `tdMode=cash` (OrderRouter, `engine.place_order`, `load_test`, `ratelimit_test`, `smoke_test`) и `okx spot place` без `--tdMode cross` (дефолт CLI — `cash`) сейчас получают `51000`.
 
+    **SPOT-TDMODE (24.09, 12:01):** `OrderRouter`, `smoke_test`, `load_test` и `ratelimit_test` берут tdMode из `account/config` через `src/account_mode.py`. Если заём возможен, ордер больше `availBal` отклоняется до биржи, а live-preflight даёт fail. Без правки остался только `engine.place_order` — задача ENGINE-TDMODE.
+23. **CCXT 4.5.83: рыночная покупка спота в режиме cross** (исходник `ccxt/okx.py`, `create_order_request`; тест `tests/test_account_mode.py::CcxtRequestTest`, без сети).
+    - Для маржинального спота (`tdMode` не `cash`) CCXT не ставит `tgtCcy` и добавляет `ccy` — котируемую валюту у покупки и базу у продажи.
+    - У okx `options['createMarketBuyOrderRequiresPrice'] = False`. При `tgtCcy=quote_ccy` без `cost` CCXT отправляет `amount` как сумму в котируемой валюте без умножения на цену и обрезает её до шага цены: 0.0002 BTC превращается в `sz="0"`.
+    - Поэтому `account_mode.spot_order_params` для рыночной покупки в режиме cross передаёт `tgtCcy=quote_ccy` и `cost = sz × px`: в запрос уходит `sz="10"` USDT. Лимитные ордера и рыночная продажа — в базе.
+    - По документации OKX (`POST /trade/order`, поле `sz`) рыночная покупка с маржой задаётся в котируемой валюте. На demo в `acctLv=3` это ещё не проверено — остаток SPOT-TDMODE.
+
 ## Открытые вопросы
 
 1. ~~Точная карта ошибок timestamp~~ → **закрыто 2026-09-24**, эмпирически на demo: 50102 = просрочен (оба знака), 50112 = невалидный формат, 50107 = заголовок отсутствует. Источники: demo API (прямой вызов) + introduction.md (50102, окно 30 сек).

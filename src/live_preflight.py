@@ -8,6 +8,8 @@
 - ключ выпущен на суб-аккаунт (`uid != mainUid`) — суб-аккаунт и есть потолок убытка;
 - к ключу привязан IP (`ip`): до DEPLOY-VPS — предупреждение, при
   `require_ip_whitelist: true` в кармане — fail;
+- спот-ордер не может взять заём: `autoLoan` в режимах `acctLv` 3–4 или
+  `enableSpotBorrow` — fail (SPOT-TDMODE, src/account_mode.py);
 - деньги суб-аккаунта (asset-valuation, USDT) не больше `budget_usdt` кармана +5%;
 - дрейф часов, live-окно (`enabled_until` задан и не истёк), валидный `ops/live-pocket.json`;
 - в аккаунте нет чужих ордеров (clOrdId не `bot*` — их ставит не код проекта).
@@ -24,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .account_mode import parse_account_mode
 from .config import load_settings, normalize_mode, state_paths
 from .connector import check_time_sync, create_exchange, fetch_pending_orders
 from .live_policy import (
@@ -123,6 +126,18 @@ def evaluate(mode: str, *, account_config: Optional[dict], equity_usdt: Optional
         checks.append(Check("account_mode", "info",
                             f"acctLv={acct_lv} ({ACCT_LV.get(acct_lv, '?')}), "
                             f"posMode={account_config.get('posMode')}"))
+        # Заём мимо риск-ядра (SPOT-TDMODE): карман — потолок убытка, только если займа нет
+        try:
+            mode = parse_account_mode(account_config)
+        except ValueError as exc:
+            checks.append(Check("spot_borrow", strict, f"{exc} — tdMode спота не выбрать"))
+        else:
+            if mode.can_borrow:
+                checks.append(Check("spot_borrow", "fail" if live else "warn",
+                                    f"спот-ордер может взять заём: {mode.borrow_reason} — выключите "
+                                    "автозаём, иначе убыток не ограничен деньгами кармана"))
+            else:
+                checks.append(Check("spot_borrow", "ok", f"займа нет, tdMode спота={mode.spot_td_mode}"))
 
     # 7. Деньги суб-аккаунта против бюджета
     if equity_usdt is None:

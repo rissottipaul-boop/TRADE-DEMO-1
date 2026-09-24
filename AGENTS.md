@@ -69,6 +69,7 @@
 | `src/engine.py` | Движок: WS public + private, реконсиляция, equity, флаги `data/KILL` и `data/STOP_ENGINE` |
 | `src/ws_client.py`, `src/storage.py`, `src/reconciler.py` | WS-клиент, SQLite-состояние движка, сверка с биржей |
 | `src/order_router.py` | Выставление ордеров с риск-проверкой (используют стратегии) |
+| `src/account_mode.py` | Режим аккаунта (`acctLv`, autoLoan): tdMode спота и запрет скрытого займа — для роутера, скриптов и live-preflight |
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
 | `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |

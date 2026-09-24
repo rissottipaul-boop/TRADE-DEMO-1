@@ -70,6 +70,9 @@ class FakeExchange:
     def fetch_order(self, order_id, symbol=None):
         return {"id": order_id, "status": "open", "symbol": symbol}
 
+    def private_get_account_config(self, params=None):  # режим аккаунта для tdMode (SPOT-TDMODE)
+        return {"code": "0", "data": [{"acctLv": "1", "autoLoan": False}]}
+
     def cancel_order(self, order_id, symbol=None):
         self.cancelled.append(order_id)
         self.pending = [o for o in self.pending if o["ordId"] != order_id]

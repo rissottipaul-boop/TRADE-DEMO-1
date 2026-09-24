@@ -14,6 +14,7 @@ import sys
 import time
 
 from . import order_owner
+from .account_mode import check_no_borrow, fetch_account_mode, spot_order_params
 from .config import load_settings
 from .connector import check_time_sync, create_exchange, okx_call
 from .storage import OrderRecord, Storage
@@ -47,9 +48,18 @@ def main() -> int:
     usdt_free = balance.get("USDT", {}).get("free")
     log.info("Баланс USDT (free): %s", usdt_free)
 
+    # tdMode спота по режиму аккаунта и без займа (SPOT-TDMODE, src/account_mode.py)
+    acct = okx_call(fetch_account_mode, ex)
+    log.info("Режим аккаунта: acctLv=%s (%s), tdMode спота %s", acct.acct_lv, acct.name, acct.spot_td_mode)
+    ok, reason = check_no_borrow(ex, acct, SYMBOL, "buy", "limit", TEST_AMOUNT, TEST_PRICE)
+    if not ok:
+        log.error("Ордер не ставлю: %s", reason)
+        return 1
+
     cl_ord_id = order_owner.new_cl_ord_id(order_owner.SMOKE_TEST)
     order = okx_call(ex.create_limit_buy_order, SYMBOL, TEST_AMOUNT, TEST_PRICE,
-                     {"clOrdId": cl_ord_id})
+                     {**spot_order_params(acct, "limit", "buy", TEST_AMOUNT, TEST_PRICE),
+                      "clOrdId": cl_ord_id})
     log.info("Ордер размещён: id=%s status=%s clOrdId=%s", order["id"], order["status"], cl_ord_id)
 
     inst_id = SYMBOL.replace("/", "-")

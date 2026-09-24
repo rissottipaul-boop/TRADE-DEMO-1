@@ -183,6 +183,9 @@ class FakeExchange:
     def fetch_balance(self):
         return {"total": {"USDT": 10_000.0}}
 
+    def private_get_account_config(self, params=None):  # режим аккаунта для tdMode (SPOT-TDMODE)
+        return {"code": "0", "data": [{"acctLv": "1", "autoLoan": False}]}
+
 
 class PlacementPathsTest(unittest.TestCase):
     """OrderRouter, DCABot и live_runner ставят префикс своего владельца."""

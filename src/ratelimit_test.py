@@ -36,7 +36,8 @@ reconcile движка (GET orders-pending/positions раз в 60 с) не ко�
 бюджет place. Пересечение только одно: per-instId лимит place BTC-USDT общий —
 если движок решит поставить ордер ровно в секунды шторма, он получит 50011 и
 уйдёт в свой штатный retry (это зафиксируем в отчёте, движок не останавливаем).
-Потолок ордеров режется по свободному балансу (≤30% free USDT).
+Потолок ордеров режется по свободному балансу (≤30% availBal USDT — деньги без займа).
+tdMode ордеров — по режиму аккаунта (SPOT-TDMODE, src/account_mode.py).
 
 Запуск: .venv\\Scripts\\python.exe -m src.ratelimit_test [--mode single|batch|public]
         [--threads 16] [--batch 20] [--max-orders 240]
@@ -54,6 +55,7 @@ import time
 import ccxt
 
 from . import order_owner
+from .account_mode import avail_balance, fetch_account_mode
 from .config import load_settings
 from .connector import (
     create_exchange,
@@ -88,11 +90,16 @@ WINDOW_MS = 2000  # окно, в котором OKX считает лимиты 
 HDR_PREFIXES = ("retry", "x-ratelimit", "ratelimit")
 
 
+# tdMode спота по режиму аккаунта (SPOT-TDMODE, src/account_mode.py): run()
+# выставляет его до старта потоков; в acctLv 3–4 cash даёт 51000
+_spot_td_mode = "cash"
+
+
 def _order_params(price: float, amount: float, cl_ord_id: str) -> dict:
     """Один ордер: лимитный buy; expTime уйдёт заголовком (OKXExchange.sign)."""
     return {
         "instId": INST_ID,
-        "tdMode": "cash",
+        "tdMode": _spot_td_mode,
         "side": "buy",
         "ordType": "limit",
         "px": f"{price:.1f}",  # tickSz BTC-USDT = 0.1
@@ -447,6 +454,7 @@ def _our_pending(exchange) -> list[dict]:
 
 def run(mode: str, threads: int, batch: int, max_orders: int,
         linger_ms: int) -> tuple[int, dict]:
+    global _spot_td_mode
     settings = load_settings()
     if not settings.is_demo:
         log.error("Тест rate limit запускать только в demo (OKX_MODE=demo)")
@@ -458,8 +466,12 @@ def run(mode: str, threads: int, batch: int, max_orders: int,
     amount = round(MIN_COST_USDT / price, 8)
 
     if mode != "public":
-        # Потолок по свободным средствам: заморозка ≤ 30% free USDT
-        free_usdt = float((ex0.fetch_balance().get("free") or {}).get("USDT") or 0)
+        acct = fetch_account_mode(ex0)
+        _spot_td_mode = acct.spot_td_mode
+        log.info("Режим аккаунта: acctLv=%s (%s), tdMode спота %s", acct.acct_lv, acct.name, _spot_td_mode)
+        # Потолок по свободным средствам: заморозка ≤ 30% availBal USDT. availBal —
+        # деньги без займа: и при autoLoan (acctLv 3–4) шторм в заём не уйдёт
+        free_usdt = avail_balance(ex0, "USDT")
         affordable = int(free_usdt * MAX_FREE_BALANCE_FRACTION / MIN_COST_USDT)
         if max_orders > affordable:
             log.warning("max-orders урезан %d -> %d (free USDT %.1f)",
