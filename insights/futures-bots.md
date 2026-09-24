@@ -665,4 +665,23 @@ L — эффективное плечо = нотионал позиции / ма
 
 | Время (+05:00) | Действие | Результат |
 | --- | --- | --- |
-| — | Запусков ещё не было: аккаунт в `acctLv=3`, переключение в `acctLv=2` — ACCT-MODE-DERIV | — |
+| 24.09 ≈ 14:50–14:59 | ACCT-MODE-DERIV: переход `acctLv` 3 → 2 (точное время неизвестно, bills его не пишут) | `acctLv 2`, `autoLoan false`; движок — восемь `50001` в 14:53–14:59, дальше чисто ([okx-api.md](okx-api.md) §10 п. 24) |
+| 24.09 20:29:26 | DEMO-USDT-TOPUP: `POST account/demo-adjust-balance` +5 000 USDT | bills: `type 1` `subType 11` (перевод, зачисление), `from 0` → `to 18`, `billId 3951415749681033217`, USDT `cashBal` 5 114.66 → 10 114.66. Скачок equity ≈ +5 000 (≈ +4.8%) — **капитал, не PnL**; `pnl_ledger` должен исключать `type 1`. Движок в это время не работал (остановлен в 19:39); HWM риск-ядра поднялся при запуске 02:36 25.09 (equity = HWM 109 209) |
+| 24.09 20:32:29 | CFLEET-PROBE: neutral grid `3951421914475843584`, BTC-USDT-SWAP 80 700–87 500, 23 линии, 2x, `sz 160`, `--no-basePos`, `slRatio 0.08` | Создан без `51057`. `type 12`: 202 −160 / 200 +160. На старте позиции нет |
+| 24.09 20:33:31 | CFLEET-PROBE: long grid `3951423978308268032`, тот же диапазон, 2x, `sz 160`, `basePos true`, `slTriggerPx 78279` | Создан без `51057`; в секунду создания куплено рынком ≈ 0.1 контракта |
+| 25.09 02:40 | Снимок до остановки | Neutral: `eq 160.22`, `actualLever 0.05`, `liqPx 230 518`, `fundingFee +0.0000556`, позиция −0.01 (`cross`, `adl 1`). Long: `eq 160.42`, `actualLever 0.53`, `liqPx 13 599`, `fundingFee −0.000556`, позиция +0.1. `liquidate-price`: neutral `shortLiqPx 218 116`, long `longLiqPx 0`. `account/positions` — пусто. USDT `eq` 19 101.46 = `cashBal` 10 864.92 + `stgyEq` 8 236.54 |
+| 25.09 02:42:40 | FLEET-KILL-CGRID-DEMO: `connector.stop_grid_bots(ex, algo_ids=["3951421914475843584"])` (stopType 2, путь kill-switch) | `stopped`. Повтор: `no_close_position`, `cancelType 1`, сетка снята (sub-orders 0), позиция −0.01 и маржа 160.21 остались в боте |
+| 25.09 02:43:02 | `okx --demo bot grid close-position --algoId 3951421914475843584 --mktClose` | `state stopped`, `eq 0`; 0.01 закрыт по 84 428.9; 160.21 вернулись на торговый счёт (`type 12`). Итог бота: `totalPnl +0.209` |
+| 25.09 02:43:21 | `okx --demo bot grid stop --algoId 3951423978308268032 … --stopType 1` | `sCode 0`; сразу `stopped`, позиция 0.1 закрыта рынком по 84 393.4, 160.38 вернулись на торговый счёт. Итог бота: `totalPnl +0.381` |
+| 25.09 02:44 | Проверка | Активных `contract_grid` нет, `account/positions` пуст, USDT `cashBal` 11 185.51, `stgyEq` 7 915.89 (спот-флот). Флот и `3949248990629228544` не тронуты |
+
+**Ответы на §9** (подробно — [okx-api.md](okx-api.md) §10 п. 25):
+
+- **П. 1.** Маржа бота лежит в USDT `stgyEq` и входит в `eq` и `totalEq`. Создание и остановка пишут пары `type 12` (202 — списание, 200 — зачисление). `asset-valuation` не снимали (EQUITY-CBOTS).
+- **П. 2.** `mgnMode cross` внутри счёта бота: `liqPx` считается от eq бота, убыток ограничен маржой бота.
+- **П. 3.** **В `account/positions` позиции ботов не видны** — надзор только через `bot grid positions`.
+- **П. 4.** Long с `basePos true` покупает базу рынком при создании. Neutral с `basePos false` позицию не открывает. Neutral с `basePos true` не проверяли — для neutral всегда `--no-basePos`.
+- **П. 5.** Не проверено: SL не срабатывал (MON-CFLEET).
+- **П. 7.** После `stopType 2` — `no_close_position`, сетка снята, позиция и маржа остаются в боте, `slRatio` в `details` виден. `close-position --mktClose` закрывает остаток и возвращает маржу. `stopType 1` закрывает позицию рынком сразу.
+- **П. 8.** Funding бота — в bills основного счёта (`type 8`, 173 и 174, `instId` SWAP, `bal` бота) и в `fundingFee`.
+- **П. 10.** BTC-USDT-SWAP demo против live: close отклоняется в среднем на 0.004%, пустых свечей нет, спред demo 0.04% против 0.0001% на live.
