@@ -117,6 +117,20 @@ class DeniedTest(unittest.TestCase):
             "*** Begin Patch\n*** Update File: src/risk.py\n@@\n-DAILY_LOSS_LIMIT_PCT = 6.0\n"
             "+DAILY_LOSS_LIMIT_PCT = 20.0\n*** End Patch")))
 
+    def test_equity_max_age_cannot_be_loosened(self):
+        # GUARD-EQUITY-AGE: порог «equity не старше 10 минут» ослабляется ростом
+        self.assertIsNotNone(edit("replace_string_in_file", filePath="src/risk.py",
+                                  oldString="EQUITY_MAX_AGE_S = 600", newString="EQUITY_MAX_AGE_S = 3600"))
+        self.assertIsNotNone(edit("Edit", file_path=str(ROOT / "src" / "risk.py"), old_string="x",
+                                  new_string='EQUITY_MAX_AGE_S = float("inf")'))
+        self.assertIsNotNone(edit("create_file", filePath="src/engine.py",
+                                  content="from . import risk\nrisk.EQUITY_MAX_AGE_S = 10**9\n"))
+        # ужесточение и прежнее значение проходят
+        self.assertIsNone(edit("replace_string_in_file", filePath="src/risk.py",
+                               oldString="EQUITY_MAX_AGE_S = 600", newString="EQUITY_MAX_AGE_S = 300"))
+        self.assertIsNone(edit("Edit", file_path=str(ROOT / "src" / "risk.py"), old_string="x",
+                               new_string="EQUITY_MAX_AGE_S = 600  # без изменений"))
+
     def test_limit_monkeypatch_from_other_module(self):
         self.assertIsNotNone(edit("create_file", filePath="src/dca_bot.py",
                                   content="from . import risk\nrisk.MAX_POSITION_PCT = 50\n"))
