@@ -1,0 +1,315 @@
+{
+  "main": {
+    "id": "5324373015726ba8",
+    "type": "split",
+    "children": [
+      {
+        "id": "4509724f8bf84da7",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "e7a7b303c61786dc",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Home.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Home"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "be4d77759dd0b9ab",
+    "type": "split",
+    "children": [
+      {
+        "id": "1d9bd92516ed6472",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "29706063f6982f28",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Поиск"
+            }
+          },
+          {
+            "id": "4ad75f3b70d857c2",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "Закладки"
+            }
+          }
+        ],
+        "currentTab": 1
+      }
+    ],
+    "direction": "horizontal",
+    "width": 615.5
+  },
+  "right": {
+    "id": "1e53e0056b353411",
+    "type": "split",
+    "children": [
+      {
+        "id": "a7c0172834cc4502",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "85ce74f3b232f89e",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Обратные ссылки"
+            }
+          },
+          {
+            "id": "b99dd858440c08c5",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Исходящие ссылки"
+            }
+          },
+          {
+            "id": "d5e312bd71946084",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Теги"
+            }
+          },
+          {
+            "id": "8b9c87e4497bf225",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "Все свойства"
+            }
+          },
+          {
+            "id": "4fd2cd6fb1e86924",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "Home.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Структура"
+            }
+          },
+          {
+            "id": "a49e43a459220dea",
+            "type": "leaf",
+            "state": {
+              "type": "footnotes",
+              "state": {
+                "file": "Home.md"
+              },
+              "icon": "lucide-file-signature",
+              "title": "Сноски"
+            }
+          },
+          {
+            "id": "04b812f57c8bd8c5",
+            "type": "leaf",
+            "state": {
+              "type": "calendar",
+              "state": {},
+              "icon": "calendar-with-checkmark",
+              "title": "Calendar"
+            }
+          },
+          {
+            "id": "c4b5eb6d8efdb082",
+            "type": "leaf",
+            "state": {
+              "type": "smart-env-status-view",
+              "state": {},
+              "icon": "gauge",
+              "title": "Smart Environment Status"
+            }
+          },
+          {
+            "id": "410bc8847059ce8b",
+            "type": "leaf",
+            "state": {
+              "type": "smart-connections-view",
+              "state": {},
+              "icon": "smart-connections",
+              "title": "Connections"
+            }
+          },
+          {
+            "id": "6808b00af706db85",
+            "type": "leaf",
+            "state": {
+              "type": "advanced-tables-toolbar",
+              "state": {},
+              "icon": "spreadsheet",
+              "title": "Advanced Tables"
+            }
+          },
+          {
+            "id": "29274f2588ee77a9",
+            "type": "leaf",
+            "state": {
+              "type": "git-view",
+              "state": {},
+              "icon": "git-pull-request",
+              "title": "Source Control"
+            }
+          }
+        ],
+        "currentTab": 10
+      }
+    ],
+    "direction": "horizontal",
+    "width": 1057.5
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Меню быстрого перехода": false,
+      "graph:Граф": false,
+      "canvas:Создать новый холст": false,
+      "daily-notes:Сегодняшняя заметка": false,
+      "templates:Вставить шаблон": false,
+      "command-palette:Открыть палитру команд": false,
+      "bases:Создать новую базу": false,
+      "markdown-importer:Импорт Markdown-файлов": false,
+      "workspaces:Пространства": false,
+      "zk-prefixer:Создать заметку с уникальным идентификатором": false,
+      "table-editor-obsidian:Advanced Tables Toolbar": false,
+      "obsidian-excalidraw-plugin:Создать новый чертеж": false,
+      "templater-obsidian:Templater": false,
+      "omnisearch:Omnisearch": false,
+      "homepage:Open homepage": false,
+      "obsidian-kanban:Create new board": false,
+      "obsidian-git:Open Git source control": false,
+      "obsidian42-brat:BRAT": false,
+      "smart-connections:Smart Connections: Open random connection": false,
+      "smart-connections:Smart Connections: Open connections view": false,
+      "smart-connections:Toggle Footer Connections": false,
+      "smart-lookup:Smart Lookup: Open lookup view": false,
+      "smart-context:Smart Context: List Named Contexts": false,
+      "smart-context:Smart Context: Open Builder": false,
+      "smart-context:Smart Context: Copy current": false,
+      "smart-templates:Smart Templates: Open template context": false
+    }
+  },
+  "floating": {
+    "id": "8b4e004d8ce49f16",
+    "type": "floating",
+    "children": [
+      {
+        "id": "f88bc305adf67669",
+        "type": "window",
+        "children": [
+          {
+            "id": "aba024f4b02a4615",
+            "type": "tabs",
+            "children": [
+              {
+                "id": "4e456b5a25940b16",
+                "type": "leaf",
+                "state": {
+                  "type": "webviewer",
+                  "state": {
+                    "url": "https://community.sketch-your-mind.com/t/excalidraw-mastery-building-your-toolset/18",
+                    "title": "Excalidraw Mastery: Building Your Toolset - Learn to Think Visually - Sketch Your Mind",
+                    "mode": "webview"
+                  },
+                  "icon": "globe-2",
+                  "title": "Excalidraw Mastery: Building Your Toolset - Learn to Think Visually - Sketch Your Mind"
+                }
+              }
+            ]
+          }
+        ],
+        "direction": "vertical",
+        "x": 768,
+        "y": 340,
+        "width": 1024,
+        "height": 800,
+        "maximize": false,
+        "zoom": 0
+      }
+    ]
+  },
+  "active": "410bc8847059ce8b",
+  "lastOpenFiles": [
+    "data/bot_state.db-shm",
+    "data/bot_state.db-wal",
+    "Excalidraw/Drawing 2026-09-24 18.22.38.excalidraw.md",
+    "Home.md",
+    "Excalidraw",
+    "README.md",
+    "Release 2.40.0 · Vinzent03 - obsidian-git.md",
+    "reports/position_sizer_2026-09-24_093614_345214.md",
+    "AGENTS.md",
+    "TRADE OKX/Без названия.canvas",
+    "Без названия.base",
+    "data/risk_state.db-journal",
+    "TRADE OKX/Добро пожаловать.md",
+    "CLAUDE.md",
+    "insights/backtester-design.md",
+    "insights/backtest-baseline.md",
+    "1.md"
+  ]
+}

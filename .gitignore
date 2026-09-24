@@ -21,3 +21,9 @@ logs/
 # IDE
 .vscode/
 .idea/
+
+
+
+
+# Ignore Smart Environment folder
+.smart-env
