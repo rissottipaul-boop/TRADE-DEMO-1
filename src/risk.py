@@ -51,6 +51,12 @@ SYS_PAUSE_HOURS = 24
 # только решение человека (AGENTS.md §2).
 EQUITY_MAX_AGE_S = 600
 
+# Потолок плеча SWAP и контрактных ботов (RISK-LEVERAGE-CAP, решение человека):
+# инвариант business-plan.md §7 — не выше 3x, только isolated. При 3x ликвидация
+# примерно в 30% от входа, дальше любого стопа проекта. Увеличение ослабляет
+# защиту — только решение человека (AGENTS.md §2).
+MAX_LEVERAGE = 3
+
 _DB_PATH = Path("data/risk_state.db")
 
 
@@ -556,6 +562,22 @@ def size_position(equity: float, entry: float, stop: float,
 def validate_stop_vs_liquidation(entry: float, stop: float, liq_price: float,
                                  side: str) -> bool:
     return _c().validate_stop_vs_liquidation(entry, stop, liq_price, side)
+
+
+def check_leverage(lever: Any) -> tuple[bool, str]:
+    """Плечо SWAP-ордера или контрактного бота: от 1 до MAX_LEVERAGE (RISK-LEVERAGE-CAP).
+
+    Возвращает (False, причина) для нечисла, NaN, inf, плеча меньше 1 и выше потолка.
+    Строка ("3", как в ответах OKX) допустима."""
+    try:
+        value = float(lever)
+    except (TypeError, ValueError):
+        return False, f"плечо {lever!r} — не число"
+    if not math.isfinite(value) or value < 1:
+        return False, f"плечо {lever!r} вне диапазона 1…{MAX_LEVERAGE}"
+    if value > MAX_LEVERAGE:
+        return False, f"плечо {value:g}x выше потолка {MAX_LEVERAGE}x (risk.MAX_LEVERAGE)"
+    return True, "ok"
 
 
 def record_pnl(inst_id: str, pnl: float, closed_at: datetime) -> list[str]:

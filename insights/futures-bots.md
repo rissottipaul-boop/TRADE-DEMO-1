@@ -105,7 +105,7 @@ L — эффективное плечо = нотионал позиции / ма
 
 - `connector.stop_grid_bots` и `connector.stop_dca_bots` по умолчанию шлют `"2"` (KILL-FLATTEN-DEFAULT). Ботов в `no_close_position` они пропускают как уже остановленных (`src/connector.py:317`).
 - Для контрактов после kill остаётся позиция с плечом **без стопа**. Для остатка в документации [И1] есть только закрытие: `grid/close-position` (рынок или лимит) или повторный stop со `stopType 1` [И2]. Эндпоинта «поставить SL на остаток» нет — проверить на demo (§9 п. 7).
-- Решение человека KILL-FLATTEN-DEFAULT («позиции закрываются по своим стопам») исходило из того, что стоп у позиции есть. У контрактного бота после `stopType 2` стопа нет. Вопрос — KILL-CONTRACT-STOPTYPE (§10); временное правило — §6.5.
+- Решение человека KILL-FLATTEN-DEFAULT («позиции закрываются по своим стопам») исходило из того, что стоп у позиции есть. У контрактного бота после `stopType 2` стопа нет. Ответ человека на KILL-CONTRACT-STOPTYPE (24.09): при kill-switch позиции не закрывать; дальше — правило §6.5.
 - Signal-ботов kill-switch не видит вообще: `emergency_stop` знает только семейства grid и DCA.
 
 ### 1.6 okx CLI 1.4.8 против API
@@ -436,7 +436,7 @@ L — эффективное плечо = нотионал позиции / ма
    - **FLEET-USDT-CAP** — продажа части BTC, но только после ENGINE-RESTART (27.09).
    
    Пополнение поднимет equity и HWM риск-ядра: breaker от этого не сработает, но скачок надо записать в журнал, чтобы `pnl_ledger` и разбор не приняли его за прибыль.
-4. **Kill.** `stop_*_bots(algo_ids=[probe])` отработал на probe-боте (FLEET-KILL-CDCA-DEMO и FLEET-KILL-CGRID-DEMO). Для `no_close_position` есть ответ человека или действует временное правило §6.5.
+4. **Kill.** `stop_*_bots(algo_ids=[probe])` отработал на probe-боте (FLEET-KILL-CDCA-DEMO и FLEET-KILL-CGRID-DEMO). Для `no_close_position` действует правило §6.5 (KILL-CONTRACT-STOPTYPE: при kill позиции не закрываются).
 
 ### 6.2 Бюджет (equity ≈ 103.4k USDT на 09:00)
 
@@ -514,7 +514,7 @@ L — эффективное плечо = нотионал позиции / ма
 - Σ `totalPnl` контрактных ботов ≤ −(Σ плановых худших) ≈ −450 USDT → стоп 1 всех контрактных ботов и инцидент в `ops/incidents.md`;
 - бот вышел из `running` не по нашему действию → инцидент.
 
-**Временное правило до ответа на KILL-CONTRACT-STOPTYPE:**
+**Правило после kill (KILL-CONTRACT-STOPTYPE, решение человека 24.09: при kill-switch позиции не закрывать):**
 - после `src.ops kill` контрактные боты стоят в `no_close_position` без SL;
 - Ops Sentinel проверяет их не реже раза в час;
 - позицию закрывает стопом со `stopType 1` (для грида можно и `okx --demo bot grid close-position --algoId <id> --mktClose`), когда цена дошла до бывшего SL бота. Это и есть «закрытие по своему стопу», эмулированное надзором (KILL-FLATTEN-DEFAULT).
@@ -534,7 +534,7 @@ L — эффективное плечо = нотионал позиции / ма
 | # | Что | Почему | Задача |
 | --- | --- | --- | --- |
 | 1 | Equity с учётом контрактных ботов | Если маржа бота вне `totalEq`, запуск выглядит для `risk.update_equity` как убыток → дневной breaker −6%. Для live то же с `asset-valuation`: неизвестно, видит ли он strategy account | CFLEET-PROBE (факты) → **EQUITY-CBOTS** |
-| 2 | Kill для `contract_grid` и `contract_dca` | `stopType 2` оставляет позицию с плечом без SL; `_list_bots` пропускает `no_close_position` (`src/connector.py:317`). Нужен `stopType` по типу бота (решение человека) и проверка на demo | **KILL-CONTRACT-STOPTYPE** (человек); FLEET-KILL-CDCA-DEMO (есть); **FLEET-KILL-CGRID-DEMO** |
+| 2 | Kill для `contract_grid` и `contract_dca` | `stopType 2` оставляет позицию с плечом без SL; `_list_bots` пропускает `no_close_position` (`src/connector.py:317`). Решение человека (KILL-CONTRACT-STOPTYPE, 24.09): `stopType 2` для всех ботов, позицию после kill закрывает надзор по бывшему SL (§6.5); нужна проверка на demo | KILL-CONTRACT-STOPTYPE (отвечено); FLEET-KILL-CDCA-DEMO (есть); **FLEET-KILL-CGRID-DEMO** |
 | 3 | Signal-боты в kill-switch | `emergency_stop` знает только grid и DCA | Вместе с С6 (HUNT-SIGNAL-BOT) |
 | 4 | SWAP в риск-ядре | Жёсткий потолок плеча ≤ 3 — константа, не конфиг. Только isolated или strategy account. Маржа и нотионал бота ≤ лимита рукава. Боты в heat: `portfolio_heat_pct` их не видит. Правило SL ↔ `liqPx` через `validate_stop_vs_liquidation` (§3.3). Funding в PnL | **RISK-SWAP-CORE** (после RISK-PNL-DOUBLE); RISK-FUNDING-PNL (есть) |
 | 5 | Учёт PnL (`src/pnl_ledger.py`) | Funding (`type 8`) и переводы в ботов (`type 12`) ledger уже знает. Нужно понять, где bills контрактного бота — на основном счёте или в strategy account. Переоценивать открытые позиции ботов по `upl` (сейчас SWAP по mark не переоценивается, [pnl-ledger.md](pnl-ledger.md) §5 п. 3). Брать `fundingFee` и `fee` из bot API. Атрибуция через `ops/sleeves.json` | **PNL-LEDGER-CBOTS** |

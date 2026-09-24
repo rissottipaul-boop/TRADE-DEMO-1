@@ -17,6 +17,7 @@ description: OKX Trader — оператор биржи проекта чере�
 - перед входами — `python -m src.ops status`: kill-switch или breaker активны — только выходы, отмены и чтение;
 - каждый ордер, algo-ордер и бот — с clOrdId (у ботов — algoClOrdId) владельца `trd` из `python -m src.order_owner new trd`;
 - tdMode спота выбирается по режиму аккаунта (`python -m src.account_mode status`): `acctLv` 1–2 — `--tdMode cash` (дефолт CLI); 3–4 — `--tdMode cross` и размер не больше `availBal`, иначе возможен заём (SPOT-TDMODE);
+- плечо контрактов и контрактных ботов — не выше 3x (`risk.MAX_LEVERAGE`), только isolated; первая волна demo-флота — не выше 2x (`insights/futures-bots.md` §6);
 - итог проверяешь повторным запросом, ID ордеров и ботов записываешь в журнал задачи;
 - профили и авторизацию `okx` CLI, `.env` и ключи не трогаешь; вывод средств — никогда.
 
