@@ -2,7 +2,7 @@
 
 - **Дата:** 2026-09-24
 - **Тема:** Минимальное риск-ядро: сайзинг фикс-% капитала, дневной лимит убытка, max-drawdown circuit breaker, kill-switch, блокировка инструмента после серии убытков, API-поверхность `src/risk.py`
-- **Статус:** implemented (p1-risk-module, 2026-09-24)
+- **Статус:** implemented (p1-risk-module, 2026-09-24); источник equity исправлен в RISK-PNL-DOUBLE (2026-09-24, §6)
 - **Задача:** p0-research-risk
 - **Решение, которое принимается:** какие числа, формулы и функции должен реализовать Insight Executor в модуле `src/risk.py` до запуска любой стратегии (Фаза 3 roadmap, раздел 2.5–2.6 phase0-demo-setup).
 
@@ -115,8 +115,9 @@ stop_distance = ATR(14) * multiplier                   # multiplier 1.5–3.0
 # --- Входы / сайзинг ---
 def check_entry_allowed(inst_id: str, side: str) -> tuple[bool, str]:
     """Единая точка допуска. Проверяет по порядку: kill-switch активен →
-    глобальный breaker → дневной лимит → лимит сделок/день → инструмент
-    заблокирован → лимит одновременных позиций → portfolio heat ≤ 6%.
+    глобальный breaker → дневной лимит → свежесть equity (update_equity был
+    и не старше EQUITY_MAX_AGE_S = 600 с) → системная пауза → лимит сделок/день
+    → инструмент заблокирован → лимит одновременных позиций → portfolio heat ≤ 6%.
     Возвращает (False, причина) при первом отказе. Все отказы логируются."""
 
 def size_position(equity: float, entry: float, stop: float,
@@ -130,19 +131,30 @@ def validate_stop_vs_liquidation(entry: float, stop: float, liq_price: float,
                                  side: str) -> bool:
     """Стоп обязан срабатывать раньше ликвидации (position-sizer №9)."""
 
+# --- Equity ---
+def update_equity(equity: float) -> list[str]:
+    """Equity по балансу биржи (движок — totalEq; live-runner — стоимость
+    кармана) — ЕДИНСТВЕННЫЙ источник equity и HWM. Проверяет дневной лимит
+    от equity на 00:00 UTC и глобальный breaker −15% от HWM. Пишет момент
+    вызова в risk_kv (equity_updated_at, переживает рестарт) — по нему
+    check_entry_allowed судит о свежести. NaN/inf отбрасываются и свежесть
+    не продлевают. Возвращает ['daily_limit', 'global_breaker'] или []."""
+
 # --- Учёт результата ---
 def record_pnl(inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
-    """Обновляет дневной PnL, high-water mark, серии убытков (per-instrument
-    и глобальную). Возвращает список сработавших событий:
-    ['daily_limit', 'global_breaker', 'instrument_blocked', ...]."""
+    """Закрытая сделка: дневной PnL (day_pnl), серии убытков (per-instrument
+    и глобальная), блокировка инструмента, системная пауза, дневной лимит по
+    day_pnl. Equity и HWM НЕ меняет; глобальный breaker проверяет по текущей
+    equity из update_equity. Возвращает список сработавших событий:
+    ['daily_limit', 'global_breaker', 'instrument_blocked', 'system_pause']."""
 
 def register_spot_buy(inst_id: str) -> None:
     """Доливка спот-позиции без плеча и стопа (DCA и т.п.). Освобождает слот
     risk_open_risk (иначе следующая покупка — «хедж»), пишет событие spot_buy.
     Это НЕ закрытие сделки: намеренно НЕ трогает серии убытков (per-instrument
     и global_loss_streak), day_pnl, equity; entries_today уже учтён через
-    register_entry в OrderRouter. Реализованный PnL — record_pnl при продаже,
-    нереализованный — update_equity. (RISK-DCA-SLOT, 2026-09-24: заменил хак
+    register_entry в OrderRouter. Реализованный PnL — record_pnl при продаже
+    (day_pnl и серии), equity — только update_equity. (RISK-DCA-SLOT, 2026-09-24: заменил хак
     record_pnl(inst, 0), который обнулял глобальную серию убытков.)"""
 
 # --- Breakers ---
@@ -164,11 +176,15 @@ def kill_switch(flatten: bool = False, by: str = "manual") -> dict:
 
 # --- Диагностика ---
 def status() -> dict:
-    """Снапшот: equity, day_pnl, drawdown от HWM, активные блокировки,
-    счётчики серий, состояние breakers — для Telegram-алертов и дашборда."""
+    """Снапшот: equity, свежесть фида equity (equity_updated_at, equity_age_s),
+    day_pnl, drawdown от HWM, активные блокировки, счётчики серий, состояние
+    breakers — для Telegram-алертов и дашборда."""
 ```
 
 Ключевые инварианты для исполнителя:
+- **Источник equity — только баланс биржи** (RISK-PNL-DOUBLE, 2026-09-24, решение человека — вариант (а)). Equity и HWM пишет только `update_equity`. Баланс по рынку уже содержит PnL открытой позиции, поэтому `record_pnl` equity не трогает. Раньше он прибавлял PnL ещё раз: прибыль у пика завышала HWM, убыток вычитался дважды, и глобальный breaker срабатывал раньше номинала — в бэктесте при 9.11% и 10.69% реальной просадки ([backtest-baseline.md](backtest-baseline.md), «Вывод»). Лимиты не менялись: breaker снова срабатывает на заданных −15% реальной просадки от HWM.
+- **Сначала equity, потом вход.** `check_entry_allowed` отказывает, если `update_equity` не вызывался ни разу или последний вызов старше `EQUITY_MAX_AGE_S = 600` с. Это двойной запас к интервалу движка (`engine._equity_interval = 300` с): без фида equity глобальный breaker не сработал бы никогда. Отметка времени «из будущего» дальше 600 с (часы переведены назад) тоже считается устаревшей. `record_pnl` свежесть не продлевает. Кто кормит equity: движок — раз в 300 с и при старте; `DCABot` — на каждой итерации перед входом (если баланс не прочитан, решает свежесть от другого фида, например движка); бэктест (`SimRisk`) — на close каждого бара. Увеличивать `EQUITY_MAX_AGE_S` — значит ослаблять защиту, это решает только человек.
+- **Переход движка.** Движок P1-72H (старт 03:22 24.09) работает на старом коде: `equity_updated_at` не пишет, а `record_pnl` не вызывает. Процессы на новом коде, которые полагаются только на его фид (не зовут `update_equity` сами), до ENGINE-RESTART получат отказ «equity ни разу не выставлялась» — это отказ в безопасную сторону. После рестарта движок пишет отметку при старте и каждые 300 с.
 - **Состояние переживает рестарт** (SQLite), breaker не снимается перезапуском.
 - Каждый отказ/триггер — запись в журнал риск-событий (phase0-demo-setup §2.3: «risk events and kill-switch events»).
 - `check_entry_allowed` вызывается **перед каждым** ордером, включая ордера DCA/grid-лестниц — без исключений.
