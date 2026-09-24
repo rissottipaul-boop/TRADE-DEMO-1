@@ -97,8 +97,10 @@ class OpsModeTest(_TempDataRoot):
         self.assertTrue(json.loads(out)["failed"])
         risk.init(config.state_paths("live").risk_db)
         self.assertTrue(risk.status()["kill_active"])
-        allowed, _ = risk.check_entry_allowed("BTC/USDT", "buy")
+        risk.update_equity(1_000)  # свежий equity: вход блокирует именно kill (RISK-PNL-DOUBLE)
+        allowed, reason = risk.check_entry_allowed("BTC/USDT", "buy")
         self.assertFalse(allowed)
+        self.assertIn("kill_switch", reason)
         self.assertFalse((self.root / "risk_state.db").exists(), "demo-состояние тронуто")
 
 

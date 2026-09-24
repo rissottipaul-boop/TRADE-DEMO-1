@@ -353,8 +353,8 @@ def parse_switch_precheck(item: dict, target: str) -> SwitchPrecheck:
     acct_lv = str(item.get("acctLv") or "")
     if acct_lv and acct_lv != target:
         blockers.append(f"acctLv {acct_lv}: ответ не для запрошенного режима {target}")
-    positions = tuple(f"{pos.get('posId', '?')} ×{pos.get('lever', '?')}"
-                      for pos in _items(item.get("posList")) if isinstance(pos, dict))
+    positions = tuple(f"{pos.get('posId', '?')} ×{pos.get('lever', '?')}" if isinstance(pos, dict) else str(pos)
+                      for pos in _items(item.get("posList")) if pos not in (None, ""))
     return SwitchPrecheck(target=target, s_code=s_code, cur_acct_lv=str(item.get("curAcctLv") or ""),
                           acct_lv=acct_lv, blockers=tuple(blockers), positions=positions,
                           margin_before=_margin_text(item.get("mgnBf")),
