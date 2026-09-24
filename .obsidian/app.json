@@ -1,0 +1,16 @@
+{
+  "useMarkdownLinks": true,
+  "newLinkFormat": "relative",
+  "alwaysUpdateLinks": true,
+  "strictLineBreaks": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "notes",
+  "attachmentFolderPath": "./attachments",
+  "userIgnoreFilters": [
+    "src/",
+    "tests/",
+    "data/",
+    "logs/",
+    "obsidian/templates/"
+  ]
+}

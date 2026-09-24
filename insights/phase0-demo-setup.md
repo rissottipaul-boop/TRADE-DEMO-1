@@ -170,8 +170,8 @@
 2. [okx-api.md](../insights/okx-api.md)
 3. [spot-strategies.md](../insights/spot-strategies.md)
 4. [startup-priority-brief.md](../insights/startup-priority-brief.md)
-5. [position-sizer](../.agents/skills/position-sizer/SKILL.md)
-6. [resilience-trader](../.agents/skills/resilience-trader/SKILL.md)
+5. position-sizer — `.agents/skills/position-sizer/SKILL.md`
+6. resilience-trader — `.agents/skills/resilience-trader/SKILL.md`
 7. https://www.okx.com/docs-v5/
 8. https://github.com/okx/ai-builder-openapi-md
 9. https://github.com/okx/builder-integration-demo

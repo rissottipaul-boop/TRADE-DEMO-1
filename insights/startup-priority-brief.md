@@ -32,7 +32,7 @@
 3. Сигнальная стратегия (mean-reversion / EMA) — только после стабильной работы.
 4. Переход на SWAP — после критерия выхода и риск-ограничений.
 
-Это совпадает с локальными skill-документами: [`trend-grid-bot`](../.agents/skills/trend-grid-bot/SKILL.md) — grid на фьючерсах имеет смысл только с фильтром тренда и риск-блоками; [`position-sizer`](../.agents/skills/position-sizer/SKILL.md) — расчёт риска обязателен до открытия позиции; [`resilience-trader`](../.agents/skills/resilience-trader/SKILL.md) — живучесть важнее доходности, вход запрещён на перегретом рынке.
+Это совпадает с локальными skill-документами: `trend-grid-bot` — grid на фьючерсах имеет смысл только с фильтром тренда и риск-блоками; `position-sizer` — расчёт риска обязателен до открытия позиции; `resilience-trader` — живучесть важнее доходности, вход запрещён на перегретом рынке.
 
 ---
 
@@ -136,9 +136,9 @@ Mean-reversion и EMA-тренд запускаются, когда проект
 
 ### Локальные skill-документы
 
-- [trend-grid-bot](../.agents/skills/trend-grid-bot/SKILL.md)
-- [position-sizer](../.agents/skills/position-sizer/SKILL.md)
-- [resilience-trader](../.agents/skills/resilience-trader/SKILL.md)
+- `.agents/skills/trend-grid-bot/SKILL.md`
+- `.agents/skills/position-sizer/SKILL.md`
+- `.agents/skills/resilience-trader/SKILL.md`
 
 ### Внешние источники
 
