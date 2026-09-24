@@ -253,7 +253,7 @@ UNMATCHED_TYPES = {
     "compliance_restriction": "маржинальная торговля недоступна по требованиям регулятора",
     "compliance_kyc2": "маржинальная торговля недоступна по требованиям регулятора, нужен KYC2",
 }
-# Подсказки к кодам смены режима, которых нет в errors.ERROR_MAP
+# Подсказки CLI к кодам смены режима; дополняют errors.ERROR_MAP (ERR-ACCT-SWITCH)
 SWITCH_HINTS = {
     "51070": ("первое включение режима OKX делает только в Web/App (Settings → Account mode; "
               "для demo — в режиме Demo trading), после этого режим переключается и через API"),
