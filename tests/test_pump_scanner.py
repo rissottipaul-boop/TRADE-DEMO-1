@@ -1,8 +1,12 @@
-"""Памп-сканер PUMP-CODIFY (src/pump_scanner.py): методика скана №5, без сети.
+"""Памп-сканер PUMP-CODIFY + ликвидность кандидата PUMP-LIQ (src/pump_scanner.py): без сети.
 
 «Биржа» — фейковый публичный REST OKX в памяти с семантикой candles/history-candles:
-новые свечи первыми, первая строка — формирующаяся (confirm=0), after — строго старше ts.
-Запросы идут через настоящий OkxPublicClient (троттлинг и повторы не подменяются).
+новые свечи первыми, первая строка — формирующаяся (confirm=0), after — строго старше ts;
+books отдаёт снимок стакана (по умолчанию DEFAULT_BOOK — глубокий и узкий, тестам без
+интереса к ликвидности не мешает). Запросы идут через настоящий OkxPublicClient (троттлинг
+и повторы не подменяются). pump-pocket.json в тестах — временный файл (pocket_file);
+setUpModule подменяет путь по умолчанию на крошечную позицию — реальный проектный файл
+тесты не читают.
 """
 import ast
 import importlib.util
@@ -29,12 +33,16 @@ SKILL_SCRIPT = ROOT / ".agents/skills/spot-momentum-scan-validate/scripts/calc_i
 
 
 def setUpModule():
-    """Страховка: журнал по умолчанию — во временном каталоге, а не в настоящем data/."""
+    """Страховка: журнал и карман по умолчанию — во временном каталоге, а не в настоящих
+    data/pump_journal.jsonl и pump-pocket.json."""
     tmp = tempfile.TemporaryDirectory()
     unittest.addModuleCleanup(tmp.cleanup)
     patcher = mock.patch.object(ps, "JOURNAL_PATH", Path(tmp.name) / "default_journal.jsonl")
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
+    pocket_patcher = mock.patch.object(ps, "POCKET_PATH", pocket_file(tmp.name))
+    pocket_patcher.start()
+    unittest.addModuleCleanup(pocket_patcher.stop)
 
 
 # --- Синтетические свечи ---
@@ -76,13 +84,41 @@ def now_after(rows):
     return int(rows[-1][0]) + H // 2 if rows[-1][8] == "0" else int(rows[-1][0]) + H + H // 2
 
 
-class FakeOkx:
-    """Opener для OkxPublicClient: tickers, candles, history-candles в памяти."""
+# --- Стакан и карман (PUMP-LIQ) ---
 
-    def __init__(self, series=None, tickers=None, errors=None):
+def fake_book(asks, bids, ts=T0):
+    """[(px, sz), …] по ask/bid -> ответ market/books (снимок; тот же формат, что у OKX)."""
+    fmt = lambda levels: [[repr(px), repr(sz)] for px, sz in levels]
+    return {"asks": fmt(asks), "bids": fmt(bids), "ts": str(ts)}
+
+
+# Глубокий узкий стакан: не мешает тестам, которым проверка ликвидности безразлична.
+DEFAULT_BOOK = fake_book([(100.0, 10_000.0), (100.05, 10_000.0), (100.1, 10_000.0)],
+                        [(99.95, 10_000.0), (99.9, 10_000.0), (99.85, 10_000.0)])
+DEFAULT_POCKET_POSITION = 1.0   # тестам без интереса к ликвидности: пороги × позиция — заведомо малы
+
+
+def pocket_file(dirpath, position=DEFAULT_POCKET_POSITION, **extra):
+    """Временный pump-pocket.json: max_position_pct = position. Настоящий файл не трогает."""
+    path = Path(dirpath) / "pump-pocket.json"
+    path.write_text(json.dumps({"max_position_pct": position, **extra}), encoding="utf-8")
+    return path
+
+
+def vol_quote_of(rows, inst_id="A-USDT"):
+    """Оборот (volCcyQuote) последней закрытой свечи серии — для порогов ликвидности в тестах."""
+    return ps.compute_metrics(ps.closed_candles(rows, inst_id))["vol_quote"]
+
+
+class FakeOkx:
+    """Opener для OkxPublicClient: tickers, candles, history-candles, books в памяти.
+    books без явного значения для пары -> DEFAULT_BOOK."""
+
+    def __init__(self, series=None, tickers=None, errors=None, books=None):
         self.series = series or {}
         self.tickers = tickers or []
         self.errors = errors or {}           # instId или "tickers" -> исключение или payload
+        self.books = books or {}             # instId -> снимок market/books (fake_book(...))
         self.urls = []
 
     def __call__(self, url, timeout):
@@ -104,6 +140,8 @@ class FakeOkx:
             after = int(q["after"]) if "after" in q else None
             rows = [r for r in self.series[key] if after is None or int(r[0]) < after]
             return self._ok(list(reversed(rows))[: int(q.get("limit", "100"))])
+        if parts.path == "/api/v5/market/books":
+            return self._ok([self.books.get(key, DEFAULT_BOOK)])
         raise AssertionError(f"неожиданный эндпоинт: {parts.path}")
 
     @staticmethod
@@ -616,7 +654,7 @@ class PublicOnlyTest(unittest.TestCase):
             self.assertEqual(f"{parts.scheme}://{parts.netloc}", "https://www.okx.com")
             self.assertIn(parts.path, ps.PUBLIC_PATHS)
             keys = {k for k, _ in urllib.parse.parse_qsl(parts.query)}
-            self.assertLessEqual(keys, {"instType", "instId", "bar", "limit", "after"})
+            self.assertLessEqual(keys, {"instType", "instId", "bar", "limit", "after", "sz"})
 
     def test_opener_refuses_everything_but_public_market(self):
         opener = ps.make_opener("demo")
@@ -658,6 +696,161 @@ class PublicOnlyTest(unittest.TestCase):
         for banned in ("ccxt", "src.connector", ".connector", ".config", ".risk",
                        ".order_router", "requests"):
             self.assertNotIn(banned, modules)
+
+
+# --- Ликвидность кандидата (PUMP-LIQ) ---
+
+class LiquidityTest(unittest.TestCase):
+    """check_liquidity/apply_liquidity: стакан market/books против позиции кармана P."""
+
+    def scan(self, rows, inst_id="A-USDT", position=None, books=None):
+        """run_scan с временным карманом; position по умолчанию — заведомо ликвидная позиция."""
+        vq = vol_quote_of(rows, inst_id)
+        position = vq / 100 if position is None else position
+        fake = FakeOkx({inst_id: rows}, books=books or {})
+        with tempfile.TemporaryDirectory() as tmp:
+            pocket = pocket_file(tmp, position)
+            report = ps.run_scan(client_for(fake), pairs=[inst_id], now_ms=now_after(rows),
+                                 pocket=pocket)
+        return report, fake
+
+    def test_liquid_candidate_passes(self):
+        rows = make_rows(99)
+        report, fake = self.scan(rows, books={"A-USDT": DEFAULT_BOOK})
+        self.assertEqual(report["candidates"], ["A-USDT"])
+        self.assertEqual(report["illiquid"], [])
+        liq = report["results"][0]["liquidity"]
+        self.assertTrue(liq["ok"])
+        self.assertEqual(liq["failed"], [])
+        self.assertTrue(all(liq["checks"].values()))
+        self.assertTrue(report["liquidity"]["enabled"])
+        self.assertTrue(report["liquidity"]["book"])
+        self.assertEqual(fake.paths().count("/api/v5/market/books"), 1)
+
+    def test_illiquid_by_depth(self):
+        rows = make_rows(99)
+        position = vol_quote_of(rows) / 10
+        book = fake_book([(100.0, position / 100.0)], [(99.9, 10.0)])   # глубина 1×P < 3×P
+        report, _ = self.scan(rows, position=position, books={"A-USDT": book})
+        self.assertEqual(report["candidates"], [])
+        self.assertEqual(report["illiquid"], ["A-USDT"])
+        row = report["results"][0]
+        self.assertEqual(row["status"], "illiquid")
+        liq = row["liquidity"]
+        self.assertEqual(liq["failed"], ["depth"])
+        self.assertIn("глубина", liq["reasons"][0])
+        self.assertEqual(row["reasons"], liq["reasons"])   # reasons строки переписаны из liquidity
+
+    def test_illiquid_by_spread(self):
+        rows = make_rows(99)
+        position = vol_quote_of(rows) / 10
+        book = fake_book([(100.0, 50 * position / 100.0)], [(50.0, 10.0)])   # спред ≈ 66 %
+        report, _ = self.scan(rows, position=position, books={"A-USDT": book})
+        self.assertEqual(report["illiquid"], ["A-USDT"])
+        liq = report["results"][0]["liquidity"]
+        self.assertEqual(liq["failed"], ["spread"])
+        self.assertIn("спред", liq["reasons"][0])
+
+    def test_illiquid_by_turnover(self):
+        rows = make_rows(99)
+        position = vol_quote_of(rows)                       # оборот = 1×P < 5×P
+        book = fake_book([(100.0, 10 * position / 100.0)], [(99.9, 10.0)])
+        report, _ = self.scan(rows, position=position, books={"A-USDT": book})
+        self.assertEqual(report["illiquid"], ["A-USDT"])
+        liq = report["results"][0]["liquidity"]
+        self.assertEqual(liq["failed"], ["turnover"])
+        self.assertIn("оборот", liq["reasons"][0])
+
+    def test_non_usdt_quote_is_illiquid(self):
+        rows = make_rows(99)
+        report, fake = self.scan(rows, inst_id="A-USDC", position=1.0)
+        self.assertEqual(report["illiquid"], ["A-USDC"])
+        liq = report["results"][0]["liquidity"]
+        self.assertFalse(liq["ok"])
+        self.assertIn("USDC", liq["reasons"][0])
+        self.assertIn("USDT", liq["reasons"][0])
+        self.assertNotIn("/api/v5/market/books", fake.paths())   # книгу не запрашивать незачем
+
+    def test_replay_skips_book_but_checks_turnover(self):
+        rows = make_rows(99)
+        at = now_after(rows)
+        fake = FakeOkx({"A-USDT": rows})
+        with tempfile.TemporaryDirectory() as tmp:
+            pocket = pocket_file(tmp, vol_quote_of(rows) / 10)
+            report = ps.run_scan(client_for(fake), pairs=["A-USDT"], at_ms=at, now_ms=at,
+                                 pocket=pocket)
+        self.assertNotIn("/api/v5/market/books", fake.paths())
+        self.assertFalse(report["liquidity"]["book"])
+        self.assertEqual(report["candidates"], ["A-USDT"])
+        liq = report["results"][0]["liquidity"]
+        self.assertIsNone(liq["checks"]["depth"])
+        self.assertIsNone(liq["checks"]["spread"])
+        self.assertTrue(liq["checks"]["turnover"])
+        self.assertTrue(liq["notes"] and "повтор" in liq["notes"][0])
+
+    def test_pocket_missing_or_invalid_warns_and_continues(self):
+        rows = make_rows(99)
+        cases = {"нет файла": None, "битый JSON": "not json",
+                 "поле не число": json.dumps({"max_position_pct": "много"}),
+                 "поле <= 0": json.dumps({"max_position_pct": 0})}
+        for name, content in cases.items():
+            with self.subTest(case=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    pocket = Path(tmp) / "pump-pocket.json"
+                    if content is not None:
+                        pocket.write_text(content, encoding="utf-8")
+                    fake = FakeOkx({"A-USDT": rows})
+                    report = ps.run_scan(client_for(fake), pairs=["A-USDT"],
+                                         now_ms=now_after(rows), pocket=pocket)
+                self.assertEqual(report["candidates"], ["A-USDT"])       # скан не упал
+                self.assertFalse(report["liquidity"]["enabled"])
+                self.assertIsNone(report["results"][0]["liquidity"])
+                self.assertTrue(any("ликвидность не проверена" in w for w in report["warnings"]))
+                self.assertNotIn("/api/v5/market/books", fake.paths())
+
+    def test_no_liquidity_flag_disables_check(self):
+        rows = make_rows(99)
+        fake = FakeOkx({"A-USDT": rows})
+        code, out, _ = run_main(["--pairs", "A-USDT", "--no-liquidity", "--no-journal", "--json"],
+                                fake, now_after(rows))
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["candidates"], ["A-USDT"])
+        self.assertFalse(report["liquidity"]["enabled"])
+        self.assertIn("no-liquidity", report["liquidity"]["note"])
+        self.assertIsNone(report["results"][0]["liquidity"])
+        self.assertNotIn("/api/v5/market/books", fake.paths())
+
+    def test_book_requested_only_for_candidates_and_near(self):
+        series = {
+            "CAND-USDT": make_rows(99),                                     # candidate
+            "NEAR-USDT": make_rows(99, last_pct=1.0),                       # near (импульс)
+            "REJ-USDT": make_rows(99, last_pct=0.5, last_vol_mult=1.0),     # rejected (2 условия)
+            "FEW-USDT": make_rows(20),                                      # insufficient
+        }
+        fake = FakeOkx(series)
+        with tempfile.TemporaryDirectory() as tmp:
+            pocket = pocket_file(tmp)
+            report = ps.run_scan(client_for(fake), pairs=list(series),
+                                 now_ms=max(now_after(r) for r in series.values()), pocket=pocket)
+        self.assertEqual(set(report["near"]), {"NEAR-USDT"})
+        requested = {dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query))["instId"]
+                    for u in fake.urls if urllib.parse.urlsplit(u).path == "/api/v5/market/books"}
+        self.assertEqual(requested, {"CAND-USDT", "NEAR-USDT"})
+
+    def test_scan4_imx_style_illiquid(self):
+        """Кейс скана №4 (докстринг модуля): фильтр из пяти условий пройден, illiquid — depth
+        и turnover, в тех же кратностях позиции P, что в реальном скане (3.98×, 1.51×, 2.12×)."""
+        rows = make_rows(99, last_pct=2.51, last_vol_mult=3.98)
+        turnover = vol_quote_of(rows, "IMX-USDT")
+        position = turnover / 1.51
+        book = fake_book([(1.0, 2.12 * position)], [(0.999, 10.0)])
+        report, _ = self.scan(rows, inst_id="IMX-USDT", position=position,
+                              books={"IMX-USDT": book})
+        row = report["results"][0]
+        self.assertEqual(row["failed"], [])                     # прошёл фильтр пяти условий
+        self.assertEqual(row["status"], "illiquid")
+        self.assertEqual(set(row["liquidity"]["failed"]), {"depth", "turnover"})
 
 
 if __name__ == "__main__":
