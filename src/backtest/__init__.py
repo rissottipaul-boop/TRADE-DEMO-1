@@ -10,6 +10,8 @@
 - walkforward — rolling 180/30/30 д, holdout 6 мес, purge/embargo (§2);
 - analysis    — slicing (lookahead) и recursive проверки (§1.2);
 - strategies  — базовые стратегии проверки контура (buy&hold, SMA-cross);
+- meanrev     — mean-reversion RSI/BB со стопом ATR и ROI-таблицей (MEANREV-IMPL) и его
+                отчёт: python -m src.backtest.meanrev --out insights/meanrev-backtest.md;
 - report      — markdown-отчёт; CLI: python -m src.backtest --help.
 
 Офлайн: ордеров не ставит, движок (src/engine.py) и его состояние не трогает.

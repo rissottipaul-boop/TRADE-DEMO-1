@@ -529,8 +529,7 @@ def emergency_stop(exchange, include_bots: bool = True,
 #
 # Проблема: risk.set_order_canceller хранит ОДИН слот — при одновременной
 # работе engine и OrderRouter последняя регистрация перезаписывала предыдущую
-# (engine.py: risk.set_order_canceller в __init__; engine.py не меняем —
-# работает движок). Решение: список подписчиков здесь, в risk регистрируется
+# (так делал engine.py до ENGINE-KILL-REG). Решение: список подписчиков здесь, в risk регистрируется
 # единый диспетчер kill_switch_dispatch, который вызывает ВСЕХ подписчиков.
 # Подписчик — callable(flatten: bool) -> {"cancelled": [...], "failed": [...]}
 # (тот же контракт, что у risk.set_order_canceller).

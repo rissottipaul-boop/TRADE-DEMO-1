@@ -21,7 +21,8 @@ exchange.create_order вне этого модуля запрещены.
    bot* — ордера роутера пишутся в storage и сверяются реконсилятором;
 6. fetch_order — CCXT на свежесозданном ордере может вернуть status=None,
    дочитываем реальный статус перед записью в БД;
-7. storage.upsert_order + risk.register_entry.
+7. storage.upsert_order + risk.register_entry + risk.register_entry_size
+   (размер входа — остаток позиции для выхода, ROUTER-EXIT).
 
 Kill-switch: при инициализации роутер ПОДПИСЫВАЕТСЯ на kill-switch через
 реестр connector.register_kill_callback, а в risk-модуль регистрируется
@@ -32,18 +33,38 @@ Kill-switch: при инициализации роутер ПОДПИСЫВАЕ
 algo-ордеров + остановка grid- и DCA-ботов); после отмены локальные открытые
 ордера в storage помечаются canceled.
 
-Известное ограничение: engine.py регистрирует в risk свой колбэк напрямую
-(файл не меняем — работает движок). Если engine создаётся ПОСЛЕ роутера,
-он перезапишет слот risk своим колбэком. Это безопасно: колбэк engine —
-тот же connector.emergency_stop, а локальную пометку canceled восстановит
-реконсиляция. Рекомендуемый порядок в общем процессе: сначала engine,
-затем OrderRouter — тогда в risk стоит диспетчер и вызываются все.
+Движок подписывается на kill-switch так же, через реестр (ENGINE-KILL-REG),
+поэтому порядок создания движка и роутера не важен.
 
 Демо-принцип: роутер принимает готовый exchange-объект (см. connector.py),
 сам ключи и .env не читает.
+
+Выход из позиции (ROUTER-EXIT) — отдельный метод place_exit_order (или
+place_order(..., is_exit=True), который передаёт вызов ему), а не вход.
+Он не проходит risk.check_entry_allowed: kill-switch, breaker'ы, свежесть
+equity, пауза, лимит входов, блокировка инструмента, хедж и heat выход не
+держат, иначе при аварии позицию нельзя было бы закрыть. Вместо этого
+risk.check_exit_allowed пропускает только выход из позиции, которую знает
+риск-ядро: слот по inst_id есть, сторона противоположна, размер не больше
+остатка (sz=None — весь остаток). Остаток — размер входа, который place_order
+записывает через risk.register_entry_size. Вход без размера (движок, грид)
+через роутер не закрыть. Второй рубеж — биржа: на споте продажа сверх баланса
+не пройдёт (в режимах с займом её отклонит check_no_borrow), на контрактах
+выход идёт с reduceOnly=True. Проверки ордера выход проходит так же, как
+вход: параметры, tdMode и запрет займа по режиму аккаунта, throttler,
+expTime, clOrdId с меткой владельца. Слот выход не занимает и во входы дня не
+считается. Освобождается слот по исполнению: исполненный объём уходит в
+risk.release_position, остаток уменьшается, а у нуля слот удаляется.
+Неисполненный выход (limit, частичное исполнение) роутер помнит и дочитывает в
+settle_exits (и сам перед следующим выходом по инструменту). Пока выход не
+исполнен, его объём зарезервирован: следующий выход — только из свободной
+части остатка. После рестарта процесса этот список пуст, и слот остаётся
+занятым до record_pnl стратегии — это безопасная сторона. PnL выход не
+учитывает: закрытую сделку стратегия передаёт в risk.record_pnl, как раньше.
 """
 import json
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -84,6 +105,51 @@ ACCOUNT_MODE_TTL_S = 300.0
 
 # CCXT unified side -> сторона позиции для risk.validate_stop_vs_liquidation
 _SIDE_TO_POSITION = {"buy": "long", "sell": "short"}
+
+# Финальные статусы CCXT: после них исполнение ордера выхода не меняется (ROUTER-EXIT)
+_FINAL_STATUSES = frozenset({"closed", "canceled", "expired", "rejected"})
+
+
+def _number(value: Any) -> Optional[float]:
+    """Конечное число или None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _exit_params_error(side: str, ord_type: str, px: Any, sz: Any) -> str:
+    """Причина отказа по параметрам выхода или пустая строка."""
+    if side not in ("buy", "sell"):
+        return f"сторона выхода {side!r}: нужна buy или sell"
+    if ord_type not in ("limit", "market"):
+        return f"тип ордера выхода {ord_type!r}: нужен limit или market"
+    if px is not None and not (_number(px) or 0) > 0:
+        return f"некорректная цена px={px!r}"
+    if ord_type == "limit" and px is None:
+        return "limit-выход без цены px"
+    if sz is not None and not (_number(sz) or 0) > 0:
+        return f"некорректный sz={sz!r}"
+    return ""
+
+
+def _exit_fill(order: dict, sz: float) -> tuple[float, bool]:
+    """(исполненный объём, статус финальный) ордера выхода по ответу CCXT.
+
+    Если filled нет, у closed исполнен весь sz, у остальных статусов 0: слот
+    освобождается только по подтверждённому исполнению.
+    """
+    status = order.get("status")
+    filled = _number(order.get("filled"))
+    if filled is None or filled < 0:
+        filled = sz if status == "closed" else 0.0
+    return min(filled, sz), status in _FINAL_STATUSES
+
+
+def _exceeds(a: float, b: float) -> bool:
+    """a больше b с учётом погрешности float (размеры, остатки)."""
+    return a > b and not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
 
 
 class _PlaceThrottler:
@@ -142,6 +208,10 @@ class OrderRouter:
         self.db_path = self.storage.db_path
         self.exp_ttl_ms = exp_ttl_ms
         self.throttler = _PlaceThrottler(throttle_limit, throttle_window_sec)
+        # Выходы (ROUTER-EXIT): неисполненные ордера выхода по ord_id и замок,
+        # чтобы проверка остатка и выставление шли одним шагом
+        self._pending_exits: dict[str, dict] = {}
+        self._exit_lock = threading.RLock()
         # Привязка kill-switch: роутер — подписчик реестра connector
         # (KILL-CALLBACK-OWNER); в risk регистрируется единый диспетчер,
         # который вызывает всех подписчиков, — регистрация из нескольких
@@ -170,13 +240,18 @@ class OrderRouter:
         min_sz: float = 0.0,
         risk_pct: float = risk.DEFAULT_RISK_PCT,
         owner: Optional[str] = None,     # код владельца clOrdId; None -> владелец роутера
+        is_exit: bool = False,           # True -> выход из позиции (place_exit_order)
     ) -> dict:
         """Выставить ордер через риск-слой. Возвращает dict с ok=True/False.
 
+        По умолчанию это ВХОД. is_exit=True — выход из позиции: вызов уходит в
+        place_exit_order (px, sz, owner), параметры сайзинга и стопа не нужны.
         При ok=False ордер на биржу НЕ уходил; причина в полях stage/reason.
         Исключения биржи (ccxt) не глушатся — okx_call уже залогировал sCode/sMsg.
         Незарегистрированный или не bot* владелец — ValueError до риск-проверки.
         """
+        if is_exit:
+            return self.place_exit_order(inst_id, side, ord_type, px=px, sz=sz, owner=owner)
         owner_code = order_owner.require(owner, own=True).code if owner else self.owner
 
         # 1. Допуск риск-слоя
@@ -257,8 +332,11 @@ class OrderRouter:
             cl_ord_id=cl_ord_id,
         ))
         risk.register_entry(inst_id, side, risk_pct)
+        # Остаток позиции для выхода (ROUTER-EXIT): верхняя граница — размер ордера
+        risk.register_entry_size(inst_id, side, sz)
         return {
             "ok": True,
+            "exit": False,
             "order_id": ord_id,
             "exchange_order_id": exchange_order_id,
             "cl_ord_id": cl_ord_id,
@@ -269,6 +347,196 @@ class OrderRouter:
             "ord_type": ord_type,
             "px": px,
             "sz": sz,
+        }
+
+    # --- Выход из позиции (ROUTER-EXIT) ---
+
+    def place_exit_order(
+        self,
+        inst_id: str,
+        side: str,                       # против позиции: sell закрывает buy, buy — sell
+        ord_type: str,                   # "limit" | "market"
+        px: Optional[float] = None,      # обязателен для limit
+        sz: Optional[float] = None,      # None -> весь свободный остаток позиции
+        owner: Optional[str] = None,     # код владельца clOrdId; None -> владелец роутера
+    ) -> dict:
+        """Выставить ВЫХОД из позиции, которую знает риск-ядро. Возвращает dict с ok.
+
+        Это не вход: risk.check_entry_allowed не вызывается, поэтому kill-switch,
+        breaker'ы и устаревшее equity выход не держат. Слот риска выход не
+        занимает, во входы дня не считается, а по исполнению освобождает слот
+        (risk.release_position). Допуск — risk.check_exit_allowed: позиция по
+        inst_id есть, сторона противоположна, размер не больше остатка за
+        вычетом неисполненных выходов этого роутера. Остальные проверки ордера —
+        как у входа: параметры, tdMode и запрет займа спота, throttler, expTime,
+        clOrdId владельца. Контракты — с reduceOnly=True.
+        При ok=False ордер на биржу НЕ уходил; причина в полях stage/reason.
+        """
+        owner_code = order_owner.require(owner, own=True).code if owner else self.owner
+        reason = _exit_params_error(side, ord_type, px, sz)
+        if reason:
+            log.warning("place_exit_order ОТКЛОНЁН: %s %s %s — %s", inst_id, side, ord_type, reason)
+            return {"ok": False, "stage": "exit_params", "reason": reason}
+
+        with self._exit_lock:
+            # 1. Прежние выходы по инструменту: их исполнение уменьшает остаток
+            self._settle_exits(inst_id)
+
+            # 2. Допуск риск-ядра: позиция есть, сторона противоположна, sz <= остатка
+            allowed, reason, position = risk.check_exit_allowed(inst_id, side, sz)
+            if not allowed:
+                log.warning("place_exit_order ОТКЛОНЁН risk: %s %s %s — %s",
+                            inst_id, side, ord_type, reason)
+                return {"ok": False, "stage": "check_exit_allowed", "reason": reason}
+
+            # 3. Неисполненные выходы этого роутера уже держат часть остатка
+            reserved = self._reserved_exit_sz(inst_id, position["pos_id"])
+            free = position["sz"] - reserved
+            exit_sz = free if sz is None else position["exit_sz"]
+            if not _exceeds(free, 0.0) or _exceeds(exit_sz, free):
+                reason = (f"остаток позиции {inst_id} {position['sz']:g}, из них {reserved:g} уже в "
+                          f"неисполненных выходах — свободно {max(free, 0.0):g}, запрошено "
+                          f"{exit_sz:g}; дождитесь исполнения или отмените прежний выход")
+                log.warning("place_exit_order ОТКЛОНЁН: %s", reason)
+                return {"ok": False, "stage": "exit_pending", "reason": reason}
+
+            # 4. Спот: tdMode и запрет займа, как у входа; контракты: только уменьшение
+            params, reason = self._spot_params(inst_id, side, ord_type, exit_sz, px)
+            if params is None:
+                log.warning("place_exit_order ОТКЛОНЁН: %s", reason)
+                return {"ok": False, "stage": "account_mode", "reason": reason}
+            if not is_spot(inst_id):
+                params = {**params, "reduceOnly": True}
+
+            # 5–6. Throttler и выставление с expTime и clOrdId владельца
+            self.throttler.acquire(inst_id)
+            cl_ord_id = order_owner.new_cl_ord_id(owner_code)
+            order = self._create_order_with_exp(inst_id, ord_type, side, exit_sz, px,
+                                                cl_ord_id, params)
+            exchange_order_id = order.get("id")
+            log.info("выход выставлен: %s %s %s sz=%s px=%s id=%s clOrdId=%s (владелец %s)",
+                     inst_id, side, ord_type, exit_sz, px, exchange_order_id, cl_ord_id, owner_code)
+
+            # 7. Статус и исполнение: CCXT на свежем ордере обычно без status и filled
+            if order.get("status") not in _FINAL_STATUSES and exchange_order_id:
+                order = self._fetch_exit_order(exchange_order_id, inst_id, cl_ord_id, order)
+            exit_rec = {
+                "ord_id": str(exchange_order_id or cl_ord_id),
+                "exchange_order_id": exchange_order_id, "cl_ord_id": cl_ord_id,
+                "inst_id": inst_id, "side": side, "ord_type": ord_type, "px": px,
+                "sz": exit_sz, "pos_id": position["pos_id"], "released": 0.0,
+                "create_time": time.time(), "owner": owner_code,
+            }
+            fill = self._apply_exit_fill(exit_rec, order)
+        return {
+            "ok": True,
+            "exit": True,
+            "order_id": exit_rec["ord_id"],
+            "exchange_order_id": exchange_order_id,
+            "cl_ord_id": cl_ord_id,
+            "owner": owner_code,
+            "status": fill["status"],
+            "inst_id": inst_id,
+            "side": side,
+            "ord_type": ord_type,
+            "px": px,
+            "sz": exit_sz,
+            "filled": fill["filled"],
+            "pending": fill["pending"],
+            "remaining": fill["remaining"],
+            "closed": fill["closed"],
+        }
+
+    def settle_exits(self, inst_id: Optional[str] = None) -> list[dict]:
+        """Дочитать неисполненные выходы и освободить слот по исполненному объёму.
+
+        Стратегия зовёт после исполнения limit-выхода (или по таймеру), роутер —
+        сам перед следующим выходом по инструменту. Ордер в финальном статусе
+        (closed, canceled и т. п.) из списка уходит. Ошибка чтения ордера —
+        ордер остаётся в списке, его объём по-прежнему зарезервирован.
+        """
+        with self._exit_lock:
+            return self._settle_exits(inst_id)
+
+    def pending_exits(self) -> list[dict]:
+        """Копия неисполненных выходов этого роутера (диагностика, тесты)."""
+        with self._exit_lock:
+            return [dict(rec) for rec in self._pending_exits.values()]
+
+    def _settle_exits(self, inst_id: Optional[str]) -> list[dict]:
+        reports = []
+        for rec in list(self._pending_exits.values()):
+            if inst_id is not None and rec["inst_id"] != inst_id:
+                continue
+            try:
+                if rec["exchange_order_id"]:
+                    order = okx_call(self.exchange.fetch_order, rec["exchange_order_id"],
+                                     rec["inst_id"])
+                else:
+                    order = okx_call(self.exchange.fetch_order, rec["cl_ord_id"], rec["inst_id"],
+                                     {"clOrdId": rec["cl_ord_id"]})
+            except Exception as exc:  # объём остаётся в резерве — безопасная сторона
+                log.warning("settle_exits: ордер выхода %s не прочитан (%s) — остаётся в списке",
+                            rec["ord_id"], exc)
+                reports.append({"ord_id": rec["ord_id"], "inst_id": rec["inst_id"],
+                                "error": str(exc)})
+                continue
+            reports.append({"ord_id": rec["ord_id"], "inst_id": rec["inst_id"],
+                            **self._apply_exit_fill(rec, order)})
+        return reports
+
+    def _fetch_exit_order(self, exchange_order_id: str, inst_id: str, cl_ord_id: str,
+                          fallback: dict) -> dict:
+        """fetch_order свежего выхода; при ошибке — ответ create_order (исполнение 0)."""
+        try:
+            return okx_call(self.exchange.fetch_order, exchange_order_id, inst_id)
+        except Exception as exc:
+            log.warning("fetch_order выхода %s (clOrdId %s) не удался (%s) — дочитаем в "
+                        "settle_exits", exchange_order_id, cl_ord_id, exc)
+            return fallback
+
+    def _reserved_exit_sz(self, inst_id: str, pos_id: Optional[str]) -> float:
+        """Неисполненный объём выходов этого роутера по позиции pos_id."""
+        return sum(rec["sz"] - rec["released"] for rec in self._pending_exits.values()
+                   if rec["inst_id"] == inst_id and rec["pos_id"] == pos_id)
+
+    def _apply_exit_fill(self, rec: dict, order: dict) -> dict:
+        """Учесть исполнение выхода: storage, освобождение слота, список неисполненных.
+
+        В список ордер попадает ДО вызова risk.release_position: если ядро упадёт,
+        объём останется в резерве, а исполнение дочитает следующий settle_exits.
+        """
+        filled, final = _exit_fill(order, rec["sz"])
+        status = order.get("status") or "open"
+        state = _CCXT_TO_OKX_STATE.get(status, "live")
+        if state == "live" and filled > 0:
+            state = "partially_filled"
+        self.storage.upsert_order(OrderRecord(
+            ord_id=rec["ord_id"], inst_id=rec["inst_id"], side=rec["side"],
+            ord_type=rec["ord_type"], px=rec["px"], sz=rec["sz"], state=state,
+            filled_sz=filled, avg_px=_number(order.get("average")) or 0.0, fee=0.0,
+            create_time=rec["create_time"], update_time=time.time(),
+            raw_json=json.dumps(order, ensure_ascii=False, default=str),
+            cl_ord_id=rec["cl_ord_id"],
+        ))
+        self._pending_exits[rec["ord_id"]] = rec
+        release = None
+        if _exceeds(filled, rec["released"]):
+            release = risk.release_position(rec["inst_id"], filled - rec["released"], rec["pos_id"])
+            # Исполнение учтено, даже если ядро его пропустило (позиция сменилась):
+            # повтор ничего не изменит
+            rec["released"] = filled
+        if final:
+            self._pending_exits.pop(rec["ord_id"], None)
+        position = risk.open_position(rec["inst_id"])
+        same = position is not None and position["pos_id"] == rec["pos_id"]
+        return {
+            "status": status,
+            "filled": filled,
+            "pending": not final,
+            "released": release,
+            "remaining": position["sz"] if same else 0.0 if position is None else None,
+            "closed": position is None or not same,
         }
 
     def account_mode(self) -> AccountMode:

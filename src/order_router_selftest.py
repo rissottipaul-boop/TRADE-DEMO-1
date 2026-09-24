@@ -15,12 +15,18 @@ data/bot_state.db и risk_state.db не затрагиваются. Файлы �
    (bulk cancel-batch) и помечает их canceled в storage.
 4. Throttler: третий place-вызов при лимите 2/окно ждёт освобождения окна.
 5. expTime и clOrdId проставляются в params, заголовок восстанавливается.
+6. Выход при устаревшем equity (ROUTER-EXIT): вход отклонён, продажа после
+   покупки проходит (спот, tdMode cash, без reduceOnly) и закрывает позицию.
+7. Выход при глобальном breaker: вход отклонён, выход из позиции проходит с
+   reduceOnly и после исполнения освобождает слот; выход сверх остатка, в
+   сторону позиции и второй при неисполненном первом отклоняются.
 """
 import gc
 import logging
 import sys
 import time
 from pathlib import Path
+from unittest import mock
 
 from src import risk
 from src.order_router import OrderRouter
@@ -55,6 +61,8 @@ class FakeExchange:
         self.pending: list[dict] = []
         self.headers: dict[str, str] = {}
         self._next_id = 1
+        self.amounts: dict[str, float] = {}
+        self.filled: set[str] = set()  # ордера, которые fetch_order покажет исполненными
 
     def milliseconds(self) -> int:
         return int(time.time() * 1000)
@@ -64,11 +72,15 @@ class FakeExchange:
                              "amount": amount, "price": price, "params": params or {}})
         oid = f"fake-{self._next_id}"
         self._next_id += 1
+        self.amounts[oid] = amount
         self.pending.append({"ordId": oid, "instId": symbol})
         return {"id": oid, "status": None, "symbol": symbol}
 
     def fetch_order(self, order_id, symbol=None):
-        return {"id": order_id, "status": "open", "symbol": symbol}
+        if order_id in self.filled:
+            return {"id": order_id, "status": "closed", "symbol": symbol,
+                    "filled": self.amounts[order_id]}
+        return {"id": order_id, "status": "open", "symbol": symbol, "filled": 0.0}
 
     def private_get_account_config(self, params=None):  # режим аккаунта для tdMode (SPOT-TDMODE)
         return {"code": "0", "data": [{"acctLv": "1", "autoLoan": False}]}
@@ -181,6 +193,54 @@ def main() -> None:
     throttled.throttler.acquire("Y-USDT")  # другой инструмент — без ожидания
     elapsed = time.monotonic() - start
     check("4b. лимит считается per-инструмент", elapsed < 0.2, f"{elapsed:.3f}с")
+
+    # --- 6. Выход при устаревшем equity: продажа после покупки (ROUTER-EXIT) ---
+    router = OrderRouter(fake, db_path=TEST_STATE_DB)
+    res6 = router.place_order("ETH/USDT", "buy", "limit", px=3000.0, sz=0.01)
+    check("6a. покупка при свежем equity прошла", res6["ok"], str(res6))
+    later = time.time() + risk.EQUITY_MAX_AGE_S + 60
+    with mock.patch.object(risk, "_utc_now", lambda: later):
+        res6 = router.place_order("SOL/USDT", "buy", "limit", px=150.0, sz=0.1)
+        check("6b. при устаревшем equity вход отклонён",
+              not res6["ok"] and res6["stage"] == "check_entry_allowed", str(res6))
+        fake.filled.add(f"fake-{fake._next_id}")  # следующий ордер исполнится сразу
+        res6 = router.place_exit_order("ETH/USDT", "sell", "limit", px=3100.0, sz=0.01)
+    params = fake.created[-1]["params"]
+    check("6c. продажа после покупки прошла и закрыла позицию",
+          res6["ok"] and res6["closed"] and not res6["pending"]
+          and "reduceOnly" not in params and params.get("tdMode") == "cash"
+          and risk.open_position("ETH/USDT") is None, str(res6))
+
+    # --- 7. Выход при глобальном breaker (ROUTER-EXIT) ---
+    entries = risk.status()["entries_today"]
+    risk.trip_breaker("selftest: глобальный breaker", scope="global")
+    res7 = router.place_order("ETH-USDT-SWAP", "buy", "limit", px=3000.0, sz=1.0)
+    check("7a. при breaker вход отклонён",
+          not res7["ok"] and res7["stage"] == "check_entry_allowed", str(res7))
+    res7 = router.place_order("BTC-USDT-SWAP", "buy", "limit", px=81000.0, sz=1.0, is_exit=True)
+    check("7b. выход в сторону позиции отклонён",
+          not res7["ok"] and res7["stage"] == "check_exit_allowed", str(res7))
+    res7 = router.place_exit_order("BTC-USDT-SWAP", "sell", "limit", px=81000.0, sz=2.0)
+    check("7c. выход сверх остатка отклонён",
+          not res7["ok"] and res7["stage"] == "check_exit_allowed", str(res7))
+    created = len(fake.created)
+    res7 = router.place_order("BTC-USDT-SWAP", "sell", "limit", px=81000.0, is_exit=True)
+    call = fake.created[-1]
+    check("7d. при breaker выход проходит на весь остаток с reduceOnly",
+          res7["ok"] and res7["exit"] and res7["sz"] == 1.0 and len(fake.created) == created + 1
+          and call["params"].get("reduceOnly") is True and call["side"] == "sell", str(res7))
+    check("7e. выход не считается входом, до исполнения слот занят",
+          risk.status()["entries_today"] == entries and res7["pending"]
+          and risk.open_position("BTC-USDT-SWAP") is not None, str(risk.status()))
+    res_dup = router.place_exit_order("BTC-USDT-SWAP", "sell", "market")
+    check("7f. второй выход при неисполненном первом отклонён",
+          not res_dup["ok"] and res_dup["stage"] == "exit_pending", str(res_dup))
+    fake.filled.add(res7["exchange_order_id"])
+    router.settle_exits()
+    check("7g. исполненный выход освободил слот",
+          risk.open_position("BTC-USDT-SWAP") is None and risk.status()["open_risk"] == []
+          and router.pending_exits() == [], str(risk.status()))
+    router.close()  # breaker остаётся взведённым: temp-БД риска удаляется ниже
 
     # Storage закрывает соединения после каждой операции, но risk может
     # держать своё — даём GC шанс освободить файлы перед удалением

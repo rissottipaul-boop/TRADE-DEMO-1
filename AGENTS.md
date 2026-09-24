@@ -70,7 +70,7 @@
 | `src/risk.py` | Риск-ядро: сайзинг, дневной лимит, max drawdown, блокировки, kill-switch |
 | `src/engine.py` | Движок: WS public + private, реконсиляция, equity раз в 300 с, флаги `data/KILL` и `data/STOP_ENGINE` (текст флага — в лог), kill-switch через реестр `connector.register_kill_callback`, tdMode спота по режиму аккаунта (`account_mode.py`) |
 | `src/ws_client.py`, `src/storage.py`, `src/reconciler.py` | WS-клиент, SQLite-состояние движка, сверка с биржей |
-| `src/order_router.py` | Выставление ордеров с риск-проверкой (используют стратегии) |
+| `src/order_router.py` | Выставление ордеров с риск-проверкой (используют стратегии); выход из позиции — `place_exit_order` или `is_exit=True` (ROUTER-EXIT), дочитывание неисполненных выходов — `settle_exits` |
 | `src/account_mode.py` | Режим аккаунта (`acctLv`, autoLoan): tdMode спота и запрет скрытого займа — для роутера, движка, скриптов и live-preflight |
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
@@ -78,6 +78,7 @@
 | `src/pnl_ledger.py` + `ops/sleeves.json` | PnL по рукавам из bills (только чтение), отчёт за день или неделю; правила атрибуции; методика — `insights/pnl-ledger.md` |
 | `src/backtest/` | Бэктестер: загрузка свечей, событийный движок с риск-ядром, walk-forward, anti-lookahead, отчёт (`insights/backtester-design.md`) |
 | `src/pump_scanner.py` | Памп-сканер без LLM (PUMP-CODIFY): только публичные GET, закрытые 1H-свечи, фильтр скана №5; ликвидность кандидата (PUMP-LIQ): глубина `market/books`, спред и оборот против лимита позиции `pump-pocket.json` (только чтение), иначе статус `illiquid` с причиной, `--no-liquidity` — без проверки; строка `scan` в `data/pump_journal.jsonl`; повтор прошлого скана `--at` (без стакана — только оборот) |
+| `src/pump_journal.py` | Журнал памп-кармана (PUMP-JOURNAL): схема строк `entry`, `stop`, `exit`, `error` (v=1) рядом со строкой `scan` сканера; остаток бюджета, дневной PnL (сутки UTC), просадка, открытые позиции и риск до стопов против `pump-pocket.json` — только чтение |
 | Дубли консолидированы (ARCH-DEDUP): `state.py` и `ws_public.py` удалены, канон — `storage.py` + `ws_client.py` | |
 
 | Что | Команда |
@@ -95,6 +96,7 @@
 | Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей); mean-reversion — `python -m src.backtest.meanrev --out insights/meanrev-backtest.md` |
 | Режим аккаунта | `python -m src.account_mode status` (только чтение), `precheck --acct-lv N` (только чтение), `switch --acct-lv N` (только demo; при блокерах precheck не переключает) |
 | Памп-скан (без ключей) | `python -m src.pump_scanner --exclude <базы флота> [--json] [--no-journal]`; повтор: `--at 2026-09-24T09:47+05:00 --pairs OKB-USDT …` — 0: скан выполнен, 2: ошибка данных или сети |
+| Остатки памп-кармана | `python -m src.pump_journal [--json]` — 0: вход разрешён, 1: входов нет (лимит, позиции, позиция без стопа), 2: карман или журнал не читаются |
 
 **Метка владельца ордера (ORDER-OWNER-TAG).** Каждый ордер, algo-ордер и бот, которые ставит агент, получают clOrdId с префиксом владельца. Коды владельцев: OKX Trader `trd`, Pump Risk Taker `pmp`, Ops Sentinel `sen`, Insight Executor `iex`, Crypto Insight Hunter `hnt`.
 
