@@ -321,13 +321,14 @@ def _margin_text(value: Any) -> str:
     parts = [f"{key} {value[key]}" for key in ("acctAvailEq", "mgnRatio") if value.get(key) not in (None, "")]
     for row in _items(value.get("details")):
         if isinstance(row, dict):
-            parts.append(f"{row.get('ccy', '?')}: availEq {row.get('availEq', '—')}, "
-                         f"mgnRatio {row.get('mgnRatio', '—')}")
+            parts.append(f"{row.get('ccy') or '?'}: availEq {row.get('availEq') or '—'}, "
+                         f"mgnRatio {row.get('mgnRatio') or '—'}")
     return "; ".join(parts)
 
 
 def parse_switch_precheck(item: dict, target: str) -> SwitchPrecheck:
     """data[0] precheck -> SwitchPrecheck. Всё непонятное — блокер: переключаться «на авось» нельзя."""
+    target = validate_acct_lv(target)
     s_code = "" if item.get("sCode") is None else str(item["sCode"]).strip()
     blockers: list[str] = []
     for info in _items(item.get("unmatchedInfoCheck")):
