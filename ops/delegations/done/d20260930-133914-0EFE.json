@@ -1,0 +1,8 @@
+{
+  "prompt": "Проверь новые модули funding_carry, mean_reversion, treasury и их тесты",
+  "id": "d20260930-133914-0EFE",
+  "timeout_min": 20,
+  "created": "2026-09-30T13:39:14+05:00",
+  "role": "insight-executor",
+  "from": "antigravity"
+}

@@ -1,0 +1,35 @@
+[stdout]
+Отчёт d20260930-072007-5CB4 (AGENT-TOKEN-ECONOMY, ЗАМЕР и СВЕРКА). В репозитории ничего не менялось; скрипт сверки — только `/tmp/verify_token_economy.py`. Снапшот: 2026-09-30T02:24:00Z.
+
+Примечание: `.venv\Scripts\python.exe` под WSL не запускается (ошибка vsock), использован эквивалент `python3 -m src.agent_context`. Доска живая (автопилот правит её каждые минуты: за сессию 236691 → 239062 байт), все цифры ниже — из одного снапшота.
+
+A. Замер (UTF-8 байты)
+
+| Замер | До | После | Итог |
+|---|---|---|---|
+| AGENTS.md | 18317 | 20911 | +2594 (+14,16%) |
+| board → `--stats` | 239062 | 10250 | −95,71% |
+| SYNC типичный | 257379 | 38421 | −85,07% |
+
+- A2, сырой JSON: обзор `{"board_bytes": 239062, "context_bytes": 10250, "reduction_pct_bytes": 95.71, "task": null, "metric": "UTF-8 bytes, not billed tokens"}`; ATE `{"board_bytes": 239062, "context_bytes": 17510, "reduction_pct_bytes": 92.68, "task": "AGENT-TOKEN-ECONOMY", ...}`; P1-72H `context_bytes 17351, −92.74%`; PUMP-STALE `context_bytes 17998, −92.47%` (тот же JSON-каркас).
+- A3: «до» = 18317 + 239062 = 257379; «после» = 20911 + 17510 (полная карточка `--task AGENT-TOKEN-ECONOMY`, сверено побайтово с `context_bytes`) = 38421, −85,07%.
+- AGENTS.md вырос, а не ужался: справочник §6 вынесен (−~5 КБ таблиц), но добавлены §10, блок экономии контекста и расширение §3.
+
+B. Сверка (HEAD:AGENTS.md vs текущие AGENTS.md + ops/code-map.md)
+
+- B1: 51 строка таблиц в HEAD, дословно найдено 47/51. 4 ненайденные — не потери, а расширенные версии в code-map.md: строка `src/engine.py` (+faulthandler), `src/pump_scanner.py` (+PUMP-FEED-LIVE), `ops\engine.ps1 start/status/stop` (+PID-guard), памп-скан (+`--feed demo`, повтор сканов 24.09).
+- B2: §7 — идентичны; ORDER-OWNER-TAG — идентичны; §2 — различия: переформулирован абзац про guard (`Правую колонку механически обеспечивает хук… (срабатывает перед каждым вызовом)` → `Хук проверяет правую колонку в клиентах, где проверены его подключение и формат вызовов (§10)… Во всех клиентах правая колонка обязательна независимо от hook`). Таблицы §2 без изменений.
+- B3: 13 команд вида `python -m src.*` / `ops\*.ps1` из HEAD — пропавших нет.
+- B4: битых относительных markdown-ссылок нет.
+
+Изменённые файлы: нет (только чтение + запуск команд). Проверки: `git show HEAD:AGENTS.md | wc -c`, `wc -c AGENTS.md ops/board.md ops/code-map.md`, 4× `python3 -m src.agent_context --stats [--task X]`, `python3 /tmp/verify_token_economy.py` — все exit 0.
+
+[stderr]
+muse: workspace root: /mnt/c/TG/BOT/TRADE DEMO 1 (cwd default)
+muse: warning: rules file at /mnt/c/TG/BOT/TRADE DEMO 1/AGENTS.md exists, but the workspace is untrusted, so it is skipped for this session; restart with --trust-workspace to load project rules
+muse: Skills: 23 loaded · 1 warning
+muse:   .agents: project-skills-untrusted: project skills skipped because workspace is untrusted
+muse:   Run `muse skills list --source all` for full diagnostics.
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+
+

@@ -752,6 +752,17 @@ class SyncBotsTest(unittest.TestCase):
             self.assertEqual(ex.calls.count("grid_sub_orders"), 1)
 
 
+class SignalTypesTest(unittest.TestCase):
+    def test_signal_constant_without_sync(self):
+        self.assertEqual(pl.SIGNAL_TYPES, ("contract",))
+        families = [family for family, _, _ in pl.BOT_LISTS]
+        self.assertEqual(families, ["grid", "dca"])
+
+    def test_funding_category_mapping(self):
+        self.assertEqual(pl.BILL_CATEGORY.get("8"), "funding")
+        self.assertIn("strategy_transfer", pl.CAPITAL_CATEGORIES)
+
+
 class PriceBookTest(unittest.TestCase):
     def test_now_prices_from_one_tickers_request(self):
         ex = FakeOkx([], NOW_MS)

@@ -1,0 +1,396 @@
+{
+	"nodes": [
+		{
+			"id": "g-human",
+			"type": "group",
+			"x": -60,
+			"y": -60,
+			"width": 1220,
+			"height": 330,
+			"label": "Человек",
+			"color": "6"
+		},
+		{
+			"id": "human",
+			"type": "text",
+			"x": -20,
+			"y": -10,
+			"width": 340,
+			"height": 240,
+			"text": "## Человек\nРешает то, что справа в `AGENTS.md` §2: live, сброс kill и breaker'ов, ослабление лимитов, секреты, правка guard.\n\nВывод средств — никогда агентами.",
+			"color": "6"
+		},
+		{
+			"id": "home",
+			"type": "file",
+			"x": 360,
+			"y": -10,
+			"width": 360,
+			"height": 240,
+			"file": "Home.md"
+		},
+		{
+			"id": "decisions",
+			"type": "file",
+			"x": 760,
+			"y": -10,
+			"width": 360,
+			"height": 240,
+			"file": "notes/Решения.base"
+		},
+		{
+			"id": "orch",
+			"type": "text",
+			"x": 0,
+			"y": 380,
+			"width": 340,
+			"height": 200,
+			"text": "## Оркестратор\nОсновная сессия Claude Code: SYNC доски, переносит ответы, делегирует субагентам, принимает результат тестами.",
+			"color": "4"
+		},
+		{
+			"id": "board",
+			"type": "file",
+			"x": 400,
+			"y": 340,
+			"width": 420,
+			"height": 280,
+			"file": "ops/board.md",
+			"color": "4"
+		},
+		{
+			"id": "agents",
+			"type": "file",
+			"x": 880,
+			"y": 340,
+			"width": 280,
+			"height": 280,
+			"file": "AGENTS.md"
+		},
+		{
+			"id": "g-agents",
+			"type": "group",
+			"x": -60,
+			"y": 680,
+			"width": 1220,
+			"height": 250,
+			"label": "Субагенты (.claude/agents → роли .github/agents)",
+			"color": "5"
+		},
+		{
+			"id": "iex",
+			"type": "text",
+			"x": -30,
+			"y": 730,
+			"width": 216,
+			"height": 170,
+			"text": "Insight Executor `iex`\nкод, тесты → `src/`, `tests/`",
+			"color": "5"
+		},
+		{
+			"id": "hnt",
+			"type": "text",
+			"x": 206,
+			"y": 730,
+			"width": 216,
+			"height": 170,
+			"text": "Crypto Insight Hunter `hnt`\nисследования → `insights/`",
+			"color": "5"
+		},
+		{
+			"id": "trd",
+			"type": "text",
+			"x": 442,
+			"y": 730,
+			"width": 216,
+			"height": 170,
+			"text": "OKX Trader `trd`\nордера и боты demo через `okx` CLI",
+			"color": "5"
+		},
+		{
+			"id": "pmp",
+			"type": "text",
+			"x": 678,
+			"y": 730,
+			"width": 216,
+			"height": 170,
+			"text": "Pump Risk Taker `pmp`\nпамп-карман в пределах `pump-pocket.json`",
+			"color": "5"
+		},
+		{
+			"id": "sen",
+			"type": "text",
+			"x": 914,
+			"y": 730,
+			"width": 216,
+			"height": 170,
+			"text": "Ops Sentinel `sen`\nмониторинг, kill-switch, инциденты",
+			"color": "5"
+		},
+		{
+			"id": "g-code",
+			"type": "group",
+			"x": -60,
+			"y": 990,
+			"width": 740,
+			"height": 420,
+			"label": "Код проекта (src/)",
+			"color": "3"
+		},
+		{
+			"id": "engine",
+			"type": "text",
+			"x": -30,
+			"y": 1040,
+			"width": 330,
+			"height": 150,
+			"text": "**Движок** `src/engine.py`\nWS public + private, сверка раз в 60 с, equity раз в 300 с, флаги `data/KILL`, `data/STOP_ENGINE`",
+			"color": "3"
+		},
+		{
+			"id": "risk",
+			"type": "text",
+			"x": 330,
+			"y": 1040,
+			"width": 320,
+			"height": 150,
+			"text": "**Риск-ядро** `src/risk.py`\nсайзинг, дневной лимит 6%, просадка 15%, kill-switch",
+			"color": "3"
+		},
+		{
+			"id": "router",
+			"type": "text",
+			"x": -30,
+			"y": 1220,
+			"width": 330,
+			"height": 160,
+			"text": "**Ордера** `src/order_router.py`\nриск-проверка каждого ордера, метка владельца clOrdId (`src/order_owner.py`)",
+			"color": "3"
+		},
+		{
+			"id": "snap",
+			"type": "text",
+			"x": 330,
+			"y": 1220,
+			"width": 320,
+			"height": 160,
+			"text": "**Снимок для пульта** `src/obsidian_status.py` (схема v2)\nтолько чтение → `data/obsidian/status.json` → живая панель `notes/views/live.js`\nсекция ops: live-окно, карман, сторож, guard",
+			"color": "3"
+		},
+		{
+			"id": "okx",
+			"type": "text",
+			"x": 760,
+			"y": 1040,
+			"width": 400,
+			"height": 150,
+			"text": "## OKX\n**demo** — вся текущая работа\n**live** — только малый карман в окне live-политики",
+			"color": "1"
+		},
+		{
+			"id": "guard",
+			"type": "text",
+			"x": 760,
+			"y": 1230,
+			"width": 400,
+			"height": 180,
+			"text": "## Guard\nПеред каждым вызовом инструмента: блокирует live вне окна, секреты, ослабление лимитов, сброс kill. Отказ guard'а — граница, а не баг.",
+			"color": "1"
+		},
+		{
+			"id": "roadmap",
+			"type": "file",
+			"x": 1220,
+			"y": -10,
+			"width": 360,
+			"height": 260,
+			"file": "insights/roadmap.md",
+			"color": "2"
+		},
+		{
+			"id": "plan",
+			"type": "file",
+			"x": 1220,
+			"y": 300,
+			"width": 360,
+			"height": 260,
+			"file": "insights/business-plan.md",
+			"color": "2"
+		},
+		{
+			"id": "insights",
+			"type": "file",
+			"x": 1220,
+			"y": 610,
+			"width": 360,
+			"height": 250,
+			"file": "notes/Инсайты.base",
+			"color": "2"
+		},
+		{
+			"id": "incidents",
+			"type": "file",
+			"x": 1220,
+			"y": 910,
+			"width": 360,
+			"height": 250,
+			"file": "ops/incidents.md",
+			"color": "1"
+		}
+	],
+	"edges": [
+		{
+			"id": "human-home",
+			"fromNode": "human",
+			"fromSide": "right",
+			"toNode": "home",
+			"toSide": "left",
+			"label": "смотрит"
+		},
+		{
+			"id": "home-decisions",
+			"fromNode": "home",
+			"fromSide": "right",
+			"toNode": "decisions",
+			"toSide": "left",
+			"label": "«Ответить»"
+		},
+		{
+			"id": "decisions-orch",
+			"fromNode": "decisions",
+			"fromSide": "bottom",
+			"toNode": "orch",
+			"toSide": "right",
+			"label": "SYNC: status → перенесено"
+		},
+		{
+			"id": "orch-board",
+			"fromNode": "orch",
+			"fromSide": "right",
+			"toNode": "board",
+			"toSide": "left",
+			"label": "задачи и статусы"
+		},
+		{
+			"id": "agents-board",
+			"fromNode": "agents",
+			"fromSide": "left",
+			"toNode": "board",
+			"toSide": "right",
+			"label": "регламент"
+		},
+		{
+			"id": "board-iex",
+			"fromNode": "board",
+			"fromSide": "bottom",
+			"toNode": "iex",
+			"toSide": "top"
+		},
+		{
+			"id": "board-hnt",
+			"fromNode": "board",
+			"fromSide": "bottom",
+			"toNode": "hnt",
+			"toSide": "top"
+		},
+		{
+			"id": "board-trd",
+			"fromNode": "board",
+			"fromSide": "bottom",
+			"toNode": "trd",
+			"toSide": "top"
+		},
+		{
+			"id": "board-pmp",
+			"fromNode": "board",
+			"fromSide": "bottom",
+			"toNode": "pmp",
+			"toSide": "top"
+		},
+		{
+			"id": "board-sen",
+			"fromNode": "board",
+			"fromSide": "bottom",
+			"toNode": "sen",
+			"toSide": "top"
+		},
+		{
+			"id": "router-risk",
+			"fromNode": "router",
+			"fromSide": "right",
+			"toNode": "risk",
+			"toSide": "left",
+			"label": "проверка"
+		},
+		{
+			"id": "engine-router",
+			"fromNode": "engine",
+			"fromSide": "bottom",
+			"toNode": "router",
+			"toSide": "top"
+		},
+		{
+			"id": "snap-home",
+			"fromNode": "snap",
+			"fromSide": "right",
+			"toNode": "home",
+			"toSide": "right",
+			"label": "кнопка «Обновить»"
+		},
+		{
+			"id": "router-okx",
+			"fromNode": "router",
+			"fromSide": "right",
+			"toNode": "okx",
+			"toSide": "left",
+			"label": "ордера"
+		},
+		{
+			"id": "trd-okx",
+			"fromNode": "trd",
+			"fromSide": "bottom",
+			"toNode": "okx",
+			"toSide": "top",
+			"label": "okx CLI"
+		},
+		{
+			"id": "guard-okx",
+			"fromNode": "guard",
+			"fromSide": "top",
+			"toNode": "okx",
+			"toSide": "bottom",
+			"label": "периметр"
+		},
+		{
+			"id": "iex-engine",
+			"fromNode": "iex",
+			"fromSide": "bottom",
+			"toNode": "engine",
+			"toSide": "top",
+			"label": "код"
+		},
+		{
+			"id": "hnt-insights",
+			"fromNode": "hnt",
+			"fromSide": "right",
+			"toNode": "insights",
+			"toSide": "left",
+			"label": "пишет"
+		},
+		{
+			"id": "sen-incidents",
+			"fromNode": "sen",
+			"fromSide": "right",
+			"toNode": "incidents",
+			"toSide": "left",
+			"label": "инциденты"
+		},
+		{
+			"id": "roadmap-plan",
+			"fromNode": "roadmap",
+			"fromSide": "bottom",
+			"toNode": "plan",
+			"toSide": "top"
+		}
+	]
+}

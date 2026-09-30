@@ -1,0 +1,133 @@
+diff --git a/.codex/hooks.json b/.codex/hooks.json
+new file mode 100644
+index 0000000..f297292
+--- /dev/null
++++ b/.codex/hooks.json
+@@ -0,0 +1,17 @@
++{
++  "hooks": {
++    "PreToolUse": [
++      {
++        "matcher": "*",
++        "hooks": [
++          {
++            "type": "command",
++            "command": ".venv/Scripts/python.exe ops/hooks/guard_adapter.py --client codex",
++            "commandWindows": ".venv\\Scripts\\python.exe ops\\hooks\\guard_adapter.py --client codex",
++            "timeout": 20
++          }
++        ]
++      }
++    ]
++  }
++}
+diff --git a/.gemini/settings.json b/.gemini/settings.json
+index 4355a60..4be51f6 100644
+--- a/.gemini/settings.json
++++ b/.gemini/settings.json
+@@ -1,13 +1,14 @@
+ {
+   "hooks": {
+-    "PreToolUse": [
++    "BeforeTool": [
+       {
+         "matcher": "*",
+         "hooks": [
+           {
+             "type": "command",
+-            "command": ".venv\\Scripts\\python.exe ops\\hooks\\guard.py",
+-            "timeout": 20
++            "name": "project-guard",
++            "command": ".venv\\Scripts\\python.exe ops\\hooks\\guard_adapter.py --client gemini",
++            "timeout": 20000
+           }
+         ]
+       }
+diff --git a/.muse/hooks.json b/.muse/hooks.json
+index 4355a60..6c105a1 100644
+--- a/.muse/hooks.json
++++ b/.muse/hooks.json
+@@ -6,7 +6,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": ".venv\\Scripts\\python.exe ops\\hooks\\guard.py",
++            "command": ".venv/Scripts/python.exe ops/hooks/guard_adapter.py --client muse",
+             "timeout": 20
+           }
+         ]
+diff --git a/ops/hooks/guard.py b/ops/hooks/guard.py
+index 1c719aa..905beb5 100644
+--- a/ops/hooks/guard.py
++++ b/ops/hooks/guard.py
+@@ -15,6 +15,9 @@ Guard продолжает блокировать то, что необрати
+ - прямые SQL-правки баз состояния и рекурсивное удаление ключевых каталогов/баз.
+ 
+ Вход — JSON на stdin: {"tool_name": ..., "tool_input": {...}}.
++Codex, Gemini CLI и Muse Code вызывают guard через ops/hooks/guard_adapter.py: он приводит
++их форматы (apply_patch в command, cmd/argv, вложенные вызовы, BeforeTool, пути WSL)
++к этому входу и отвечает в формате клиента (AGENT-GUARD-COMPAT).
+ Выход — JSON с permissionDecision="deny" (понимают и VS Code, и Claude Code)
+ или пустой вывод (разрешено). Сбой самого guard — пропуск с записью в лог:
+ баг guard не должен останавливать всю работу агентов.
+@@ -37,7 +40,7 @@ OKX_CONFIG = Path.home() / ".okx" / "config.toml"
+ # Файлы-периметр: их меняет только человек
+ GUARDRAIL_FILES = {"ops/live-policy.json", "ops/live-pocket.json", "ops/autopilot.json", "pump-pocket.json",
+                    ".claude/settings.json", ".gemini/settings.json", ".muse/hooks.json", ".muse/settings.json"}
+-GUARDRAIL_DIRS = ("ops/hooks/", ".github/hooks/", ".muse/")
++GUARDRAIL_DIRS = ("ops/hooks/", ".github/hooks/", ".muse/", ".codex/")
+ RISK_FILE = "src/risk.py"
+ 
+ # Лимиты риск-ядра: направление, в котором изменение ОСЛАБЛЯЕТ защиту
+@@ -214,8 +217,17 @@ def check_live_command(low: str, policy: dict) -> Optional[str]:
+             "команде. Входы в live — только src.live_runner через риск-ядро (business-plan.md §3).")
+ 
+ 
++# AGENT-GUARD-COMPAT: в корне проекта пробелы («TRADE DEMO 1»), и правило `> путь` рвёт абсолютный путь
++# на пробеле. Корень в тексте команды сводится к относительному пути: WSL, Windows, Git Bash.
++_ROOT_WIN = str(ROOT).replace("\\", "/").lower().rstrip("/") + "/"
++_ROOT_FORMS = tuple(dict.fromkeys([re.sub(r"^([a-z]):", r"/mnt/\1", _ROOT_WIN), _ROOT_WIN,
++                                   re.sub(r"^([a-z]):", r"/\1", _ROOT_WIN)]))
++
++
+ def check_command(cmd: str, policy: dict, okx_profiles) -> Optional[str]:
+     low = cmd.lower().replace("\\", "/")
++    for root_form in _ROOT_FORMS:
++        low = low.replace(root_form, "")
+     for pattern, reason in DENY_COMMAND_RULES:
+         if pattern.search(low):
+             return reason
+diff --git a/src/guard_adapter.py b/ops/hooks/guard_adapter.py
+similarity index 100%
+rename from src/guard_adapter.py
+rename to ops/hooks/guard_adapter.py
+diff --git a/tests/test_guard.py b/tests/test_guard.py
+index 0edab84..962747e 100644
+--- a/tests/test_guard.py
++++ b/tests/test_guard.py
+@@ -284,6 +284,25 @@ class NormPathTest(unittest.TestCase):
+         self.assertEqual(guard._norm_path(str(ROOT)), ".")
+ 
+ 
++class ClientPerimeterTest(unittest.TestCase):
++    """AGENT-GUARD-COMPAT: конфиги hooks клиентов и адаптер — периметр; абсолютный корень с пробелами."""
++
++    def test_client_hook_configs_are_guardrail(self):
++        for path in (".codex/hooks.json", ".codex/config.toml", ".gemini/settings.json", ".muse/hooks.json",
++                     "ops/hooks/guard_adapter.py"):
++            with self.subTest(path=path):
++                self.assertIsNotNone(edit("create_file", filePath=path, content="{}"))
++                self.assertIsNotNone(term(f"echo x > {path}"))
++
++    def test_absolute_root_with_spaces(self):
++        git_bash = "/" + str(ROOT)[0].lower() + str(ROOT)[2:].replace("\\", "/")
++        for form in (str(ROOT), str(ROOT).replace("\\", "/"), git_bash, "/mnt" + git_bash):
++            with self.subTest(form=form):
++                self.assertIsNotNone(term(f"echo x > '{form}\\ops\\hooks\\guard.py'"))
++                self.assertIsNotNone(term(f'echo x >> "{form}/pump-pocket.json"'))
++        self.assertIsNone(term(f"echo x > '{ROOT}\\insights\\x.md'"))
++
++
+ class HookContractTest(unittest.TestCase):
+     """Контракт stdin/stdout, который читают VS Code и Claude Code."""
+ 

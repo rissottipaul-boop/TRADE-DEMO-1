@@ -13,7 +13,7 @@
    комиссия уже внутри balChg. Журнал <каталог режима>/reports/pnl_ledger.db
    хранит bills дольше биржи и досинхронизируется при каждом запуске.
 2. Атрибуция по рукавам business-plan.md §2.1 — правила ops/sleeves.json:
-   ордер нативного бота (ordId из sub-orders) -> рукав бота; иначе владелец по
+   ордер нативного grid/DCA-бота (ordId из sub-orders) -> рукав бота (signal contract пока без sync); иначе владелец по
    префиксу clOrdId (коды реестра src/order_owner.py, если он есть), затем tag;
    неопознанное — рукав default_sleeve («прочее/ручное»), не выбрасывается.
 3. PnL рукава — mark-to-market его движений: V(t) = сумма по валютам
@@ -66,7 +66,7 @@ BILL_CATEGORY = {
     "1": "transfer",             # перевод между счетами и аккаунтами — движение капитала
     "2": "trade",
     "7": "interest",             # проценты по займу
-    "8": "funding",              # funding fee SWAP: subType 173 — расход, 174 — доход
+    "8": "funding",              # funding fee SWAP: subType 173 — расход, 174 — доход; funding внутри strategy-аккаунта ботов пока не верифицирован (CFLEET-PROBE)
     "12": "strategy_transfer",   # перевод в бота или из бота: пара 202 out + 200 in, в сумме 0
     "14": "trade",               # block trade
     "24": "trade",               # spread trading
@@ -75,10 +75,13 @@ BILL_CATEGORY = {
     "30": "trade",               # simple trade
 }
 CAPITAL_CATEGORIES = frozenset({"transfer", "strategy_transfer"})
+# Перевод в strategy-аккаунт контрактного бота может просадить equity риск-ядра к дневному breaker — см. CFLEET-PROBE, код не меняем.
 # clOrdId исполнений нативных ботов OKX: "O" + 19 цифр (demo 24.09, grid и DCA)
 BOT_CL_ORD_RE = re.compile(r"^O\d{19}$")
 GRID_TYPES = ("grid", "contract_grid")
 DCA_TYPES = ("spot_dca", "contract_dca")
+# Signal-боты OKX (futures-bots.md §1.1): тип contract. Пока только константа — sync_bots не трогаем.
+SIGNAL_TYPES = ("contract",)
 BOT_LISTS = (
     ("grid", GRID_TYPES, ("private_get_tradingbot_grid_orders_algo_pending",
                           "private_get_tradingbot_grid_orders_algo_history")),
@@ -1504,6 +1507,10 @@ def summary_text(report: dict) -> str:
 
 
 def main(argv=None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(prog="python -m src.pnl_ledger", description=__doc__.splitlines()[0])
     parser.add_argument("--mode", choices=MODES, default=None, help="demo|live (по умолчанию OKX_MODE, иначе demo)")

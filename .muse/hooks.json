@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".venv/Scripts/python.exe ops/hooks/guard_adapter.py --client muse",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

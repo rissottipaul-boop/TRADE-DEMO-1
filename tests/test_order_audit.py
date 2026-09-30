@@ -25,12 +25,32 @@ def page(items: list[dict], params: dict, key: str) -> list[dict]:
 class FakeExchange:
     """orders-pending / orders-algo-pending / orders-history(-archive) без сети."""
 
-    def __init__(self, pending=(), algos=(), history=None, fail=()):
+    def __init__(self, pending=(), algos=(), history=None, fail=(), bots=None, bot_history=None):
         self.pending = list(pending)
         self.algos = list(algos)
         self.history = history or {}  # instType -> ордера от новых к старым
         self.fail = set(fail)
         self.calls: list[tuple[str, dict]] = []
+        self.bots = bots or {}                # algoOrdType -> активные боты
+        self.bot_history = bot_history or {}  # algoOrdType -> остановленные, от новых к старым
+
+    def _bots(self, name, store, params):
+        self.calls.append((name, dict(params)))
+        if params["algoOrdType"] in self.fail:
+            raise ccxt.BadRequest('okx {"code":"51000","msg":"Parameter algoOrdType error"}')
+        return {"data": page(store.get(params["algoOrdType"], []), params, "algoId")}
+
+    def private_get_tradingbot_grid_orders_algo_pending(self, params):
+        return self._bots("grid_pending", self.bots, params)
+
+    def private_get_tradingbot_dca_ongoing_list(self, params):
+        return self._bots("dca_ongoing", self.bots, params)
+
+    def private_get_tradingbot_grid_orders_algo_history(self, params):
+        return self._bots("grid_history", self.bot_history, params)
+
+    def private_get_tradingbot_dca_history_list(self, params):
+        return self._bots("dca_history", self.bot_history, params)
 
     def private_get_trade_orders_pending(self, params=None):
         self.calls.append(("pending", dict(params or {})))
@@ -165,6 +185,86 @@ class AuditTest(unittest.TestCase):
                        "INFO legacy", "WARNING — ордер без метки владельца (3)", "exit 1"):
             self.assertIn(needle, text)
         self.assertIn("h9", order_audit.render_text(report, verbose=True))
+
+
+def bot(algo_id, c_time=AFTER_RULE, u_time=None, **fields) -> dict:
+    base = {"algoId": algo_id, "algoClOrdId": "", "tag": "", "instId": "BTC-USDT", "state": "running",
+            "cTime": str(c_time), "uTime": str(u_time if u_time is not None else c_time)}
+    base.update(fields)
+    return base
+
+
+class BotAuditTest(unittest.TestCase):
+    """AUDIT-BOTS: боты по algoClOrdId — активные и история за период (фикстуры по demo 30.09)."""
+
+    def exchange(self) -> FakeExchange:
+        stopped = dict(state="stopped")
+        return FakeExchange(
+            bots={"grid": [bot("g1", NOW - HOUR, algoClOrdId=cl("trd"), tag="CLI")],
+                  "spot_dca": [bot("d1", NOW - HOUR)]},  # без метки, работает сейчас
+            bot_history={
+                "grid": [bot("g2", NOW - 2 * HOUR, NOW - 2 * HOUR, **stopped),            # без метки
+                         bot("g3", BEFORE_RULE, NOW - 3 * HOUR, algoClOrdId="fltAPTgrid0924",
+                             tag="CLI", **stopped),                                          # флот до правила
+                         bot("g4", BEFORE_RULE - 1, NOW - 3 * HOUR, tag="CLI", **stopped),   # CLI до правила
+                         bot("g5", NOW - 100 * HOUR, NOW - 90 * HOUR, **stopped)],          # вне периода
+                "contract_grid": [bot("c1", NOW - 4 * HOUR, NOW - HOUR, algoClOrdId=cl("trd"), **stopped)],
+                "contract_dca": [bot("c2", NOW - 5 * HOUR, NOW - HOUR, algoClOrdId="zzz1", **stopped)],
+            })
+
+    def run_audit(self, ex, hours=24, **kwargs):
+        return order_audit.run_audit(ex, hours, now_ms=NOW, inst_types=("SPOT",), **kwargs)
+
+    def test_bots_by_owner_and_levels(self):
+        report = self.run_audit(self.exchange(), hours=(NOW - BEFORE_RULE) / HOUR + 2)
+        bots = report["bots"]
+        self.assertEqual(bots["by_owner"]["trd"]["bots"], 2)
+        self.assertEqual((bots["by_owner"]["trd"]["active"], bots["by_owner"]["trd"]["stopped"]), (1, 1))
+        self.assertEqual({r["algoId"]: r["status"] for r in bots["warnings"]},
+                         {"d1": "unmarked", "g2": "unmarked", "c2": "unknown_prefix"})
+        self.assertEqual({r["algoId"] for r in bots["info"]}, {"g3", "g4"})
+        self.assertTrue(all(r.get("legacy") for r in bots["info"]))
+        self.assertEqual({r["algoId"]: r["active"] for r in bots["warnings"]},
+                         {"d1": True, "g2": False, "c2": False})
+        self.assertEqual(bots["summary"], {"total": 7, "active": 2, "stopped": 5, "ok": 2,
+                                           "info": 2, "warning": 3})
+        self.assertEqual(bots["read"], {"bot_active": 2, "bot_history": 5})
+        self.assertEqual(order_audit.exit_code(report), 1)
+
+    def test_period_filter_by_stop_time(self):
+        report = self.run_audit(self.exchange(), hours=24)
+        ids = {r["algoId"] for r in report["bots"]["warnings"] + report["bots"]["info"]}
+        self.assertNotIn("g5", ids, "остановлен за 90 ч до конца периода 24 ч")
+        self.assertIn("g3", ids, "создан до периода, остановлен в нём — в отчёте")
+
+    def test_only_owned_bots_is_exit_0(self):
+        ex = FakeExchange(bots={"grid": [bot("g1", NOW - HOUR, algoClOrdId=cl("trd"))]})
+        report = self.run_audit(ex)
+        self.assertEqual(report["bots"]["summary"]["warning"], 0)
+        self.assertEqual(order_audit.exit_code(report), 0)
+
+    def test_bot_read_error_is_exit_2(self):
+        report = self.run_audit(FakeExchange(fail={"contract_dca"}))
+        self.assertEqual({e["source"] for e in report["bots"]["errors"]},
+                         {"боты contract_dca активные", "боты contract_dca история"})
+        self.assertEqual(order_audit.exit_code(report), 2)
+
+    def test_history_paginates_by_algo_id(self):
+        history = [bot(f"s{i}", NOW - i * 60_000, algoClOrdId=cl("trd"), state="stopped") for i in range(150)]
+        ex = FakeExchange(bot_history={"grid": history})
+        report = self.run_audit(ex)
+        self.assertEqual(report["bots"]["by_owner"]["trd"]["stopped"], 150)
+        calls = [p for name, p in ex.calls if name == "grid_history" and p["algoOrdType"] == "grid"]
+        self.assertEqual([c.get("after") for c in calls], [None, "s99"])
+
+    def test_no_bots_flag_and_render(self):
+        self.assertNotIn("bots", self.run_audit(self.exchange(), bots=False))
+        text = order_audit.render_text(self.run_audit(self.exchange(), hours=(NOW - BEFORE_RULE) / HOUR + 2))
+        for needle in ("Боты: активных 2, остановленных в периоде 5",
+                       "WARNING — бот без метки владельца, активные (1)",
+                       "WARNING — бот без метки владельца, остановленные (2)",
+                       "боты 7 (активных 2), warning 3", "exit 1"):
+            self.assertIn(needle, text)
 
 
 if __name__ == "__main__":

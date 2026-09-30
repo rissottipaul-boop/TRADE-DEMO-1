@@ -28,11 +28,18 @@ SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) — система �
 Ошибки циклов (ENGINE-ERR-CLASS): errors_exchange — сбой на стороне биржи или
 сети (OKX 50001/50004/50013/50026, HTTP 5xx, таймауты и обрывы соединения),
 errors_internal — всё остальное, в том числе 50011; errors — их сумма.
+Зависание (ENGINE-WATCHDOG): при запуске `python -m src.engine` включён faulthandler —
+фатальный сбой интерпретатора пишет стеки всех потоков в stderr (logs/engine.log), а
+таймер dump_traceback_later(HANG_DUMP_S) перевзводится каждым кругом сверки: цикл встал
+дольше чем на HANG_DUMP_S — стеки всех потоков в лог один раз (без repeat, чтобы дампы не
+освежали лог и не прятали тишину от сторожа src/engine_watchdog.py). В тестах выключено
+(hang_dump_s = None).
 
 Блокирующие вызовы CCXT выполняются в потоках (asyncio.to_thread): троттлер
 CCXT спит через time.sleep и иначе останавливал бы event loop вместе с WS-пингами.
 """
 import asyncio
+import faulthandler
 import json
 import logging
 import re
@@ -78,6 +85,10 @@ ORDER_TTL_MS = 5000  # expTime: биржа отбросит place, если он
 # человек может сменить его на ходу, а account/config — 5 запросов / 2 с
 ACCOUNT_MODE_TTL_S = 300.0
 FLAG_TEXT_LIMIT = 500  # символов текста флага в логе и в причине kill
+# Дамп стеков при зависании (ENGINE-WATCHDOG): круг сверки — 60 с сна + сама сверка
+# (в логах до 72 с). 150 с без круга — зависание; сторож перезапускает после 180 с
+# тишины лога, так что дамп успевает попасть в лог раньше перезапуска.
+HANG_DUMP_S = 150.0
 
 # --- Сон Windows (ENGINE-KEEPAWAKE) ---
 # SetThreadExecutionState: флаги winbase.h. ES_DISPLAY_REQUIRED не ставим —
@@ -218,6 +229,8 @@ class TradingEngine:
         # монотонные на Windows сон могут не учитывать (asyncio.sleep тоже)
         self._clock = time.time
         self._keep_awake = False
+        # Таймер дампа стеков (ENGINE-WATCHDOG): None — выключен (тесты); main() ставит HANG_DUMP_S
+        self.hang_dump_s: Optional[float] = None
 
     # --- Жизненный цикл ---
 
@@ -226,6 +239,7 @@ class TradingEngine:
         log.info("Starting engine (mode=%s, domain=%s, inst=%s)",
                  self.settings.mode, self.settings.domain, ",".join(self.inst_ids))
         self._acquire_keep_awake()
+        self._arm_hang_dump()
 
         drift =await asyncio.to_thread(check_time_sync, self.ex)
         log.info("Time drift: %+d ms", drift)
@@ -270,8 +284,18 @@ class TradingEngine:
             # (ENGINE-STORAGE-CLOSE; Storage.close идемпотентен)
             unregister_kill_callback(self._cancel_all_for_kill_switch)
             self._release_keep_awake()  # не бросает исключений
+            self._disarm_hang_dump()
             self.db.close()
         log.info("Engine stopped. Stats: %s", self.stats)
+
+    def _arm_hang_dump(self) -> None:
+        """Перевзвести таймер дампа стеков: не перевзведён за hang_dump_s — стеки в stderr."""
+        if self.hang_dump_s:
+            faulthandler.dump_traceback_later(self.hang_dump_s, repeat=False)
+
+    def _disarm_hang_dump(self) -> None:
+        if self.hang_dump_s:
+            faulthandler.cancel_dump_traceback_later()
 
     def _acquire_keep_awake(self) -> None:
         """Windows: запрет сна системы на время работы движка (ENGINE-KEEPAWAKE)."""
@@ -359,6 +383,7 @@ class TradingEngine:
             except Exception as e:
                 kind = self._count_error(e)
                 log.error("Reconcile error (%s): %s", kind, e)
+            self._arm_hang_dump()  # круг прошёл — цикл не завис
 
     def _check_pause(self, gap: float) -> None:
         """ENGINE-PAUSE-DETECT: между сверками больше двух интервалов — процесс стоял."""
@@ -603,6 +628,7 @@ class TradingEngine:
 
 async def main() -> None:
     engine = TradingEngine()
+    engine.hang_dump_s = HANG_DUMP_S
     try:
         await engine.start()
     finally:
@@ -614,6 +640,8 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Фатальный сбой (access violation, abort) — стеки всех потоков в stderr = logs/engine.log
+    faulthandler.enable()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

@@ -128,6 +128,10 @@ class Position:
     risk_pct: float
     tag: str
     signal_ts: int
+    trailing_stop_pct: Optional[float] = None
+    trailing_activation_pct: Optional[float] = None
+    highest_px: float = 0.0
+    initial_stop: Optional[float] = None
 
     def unrealized_pct(self, price: float) -> float:
         return self.qty * price / self.entry_cost - 1.0
@@ -142,6 +146,18 @@ class _Pending:
     risk_pct: float
     tag: str
     signal_ts: int
+    trailing_stop_pct: Optional[float] = None
+    trailing_activation_pct: Optional[float] = None
+
+
+@dataclass
+class _RestingLimit:
+    order_id: int
+    side: str
+    px: float
+    qty: float
+    tag: str
+    created_bar: int
 
 
 @dataclass
@@ -281,10 +297,13 @@ class Context:
 
     def buy(self, *, stop: Optional[float] = None, take_profit: Optional[float] = None,
             equity_pct: Optional[float] = None, risk_pct: float = risk.DEFAULT_RISK_PCT,
-            tag: str = "") -> tuple[bool, str]:
+            tag: str = "",
+            trailing_stop_pct: Optional[float] = None,
+            trailing_activation_pct: Optional[float] = None) -> tuple[bool, str]:
         """Рыночная покупка по open следующего бара. Размер: стоп -> risk.size_position
         (1% риска, потолок 15% notional); equity_pct -> доля equity (≤15%); оба -> минимум."""
-        return self._bt._request_buy(self.i, stop, take_profit, equity_pct, risk_pct, tag)
+        return self._bt._request_buy(self.i, stop, take_profit, equity_pct, risk_pct, tag,
+                                     trailing_stop_pct, trailing_activation_pct)
 
     def close(self, tag: str = "signal") -> bool:
         """Рыночная продажа всей позиции по open следующего бара (выход риском не ограничен)."""
@@ -295,6 +314,27 @@ class Context:
 
     def set_take_profit(self, px: Optional[float]) -> None:
         self._bt._set_protective(self.i, "take_profit", px)
+
+    def register_entry(self, risk_pct: float = risk.DEFAULT_RISK_PCT) -> tuple[bool, str]:
+        return self._bt._register_entry(self.i, risk_pct)
+
+    def place_limit(self, side: str, px: float, qty: float, count_as_entry: bool = True, tag: str = "") -> tuple[bool, str, int]:
+        return self._bt._place_limit(self.i, side, px, qty, count_as_entry, tag)
+
+    def cancel_limit(self, order_id: int) -> bool:
+        return self._bt._cancel_limit(order_id)
+
+    def cancel_all_limits(self) -> int:
+        return self._bt._cancel_all_limits()
+
+    def liquidate_inventory(self, ref_px: float, reason: str = "liquidate") -> None:
+        self._bt._liquidate_inventory(ref_px, reason, self.i)
+
+    def record_pnl(self, pnl: float) -> None:
+        self._bt._record_pnl(pnl)
+
+    def block_instrument(self, hours: float = 4.0) -> None:
+        self._bt._block_instrument(hours)
 
 
 class Backtest:
@@ -324,6 +364,9 @@ class Backtest:
         self.dust = 0.0
         self.pos: Optional[Position] = None
         self.pending: Optional[_Pending] = None
+        self.resting_orders: dict[int, _RestingLimit] = {}
+        self.inventory_qty: float = 0.0
+        self._next_order_id: int = 1
         self.ind: dict[str, list[float]] = {}
         self.entry_inputs: tuple[str, ...] = ()
         self.curve: list[tuple[int, float]] = []
@@ -375,6 +418,7 @@ class Backtest:
                 self._execute_pending(b, i)
             if self.pos is not None:
                 self._check_protective(b, i)
+            self._check_resting_limits(b, ctx, i)
             close_ts = b.ts + self.bar_ms
             sim.now = close_ts / 1000.0
             if i >= self.trade_start:
@@ -390,17 +434,27 @@ class Backtest:
 
     def _finish(self) -> None:
         last = self.bars[-1]
+        ctx = Context(self)
+        ctx.i = len(self.bars) - 1
+        if hasattr(self.strategy, "on_finish"):
+            self.strategy.on_finish(ctx)
         if self.pending is not None:
             self.unfilled_at_end += 1
             self.decisions.append(Decision(last.ts, "cancel_pending", "end_of_data"))
             self.pending = None
+        if self.resting_orders:
+            self.decisions.append(Decision(last.ts, "cancel_resting_limits", "end_of_data"))
+            self.resting_orders.clear()
+        if self.inventory_qty > 0:
+            ref = last.c
+            self._liquidate_inventory(ref, "end_of_data", len(self.bars) - 1)
         if self.pos is not None:
             ref = last.c
             px = floor_to_step(ref * (1 - self.costs.slip), self.spec.tick_sz)
             self._close(px, ref, self.costs.taker_fee, "taker", "end_of_data",
                         last.ts + self.bar_ms, len(self.bars))
-            if self.curve:
-                self.curve[-1] = (self.curve[-1][0], self._equity_at(last.c))
+        if self.curve:
+            self.curve[-1] = (self.curve[-1][0], self._equity_at(last.c))
 
     def _result(self) -> BacktestResult:
         ts0 = self.trade_start
@@ -424,7 +478,7 @@ class Backtest:
     # --- Исполнение ---
 
     def _equity_at(self, price: float) -> float:
-        qty = (self.pos.qty if self.pos is not None else 0.0) + self.dust
+        qty = (self.pos.qty if self.pos is not None else 0.0) + self.inventory_qty + self.dust
         return self.cash + qty * price
 
     def _execute_pending(self, b: Bar, i: int) -> None:
@@ -450,7 +504,11 @@ class Backtest:
                             entry_px=px, entry_cost=cost, entry_fee=fee_base * px,
                             entry_slip=qty * (px - ref), stop=o.stop,
                             take_profit=o.take_profit, risk_pct=o.risk_pct, tag=o.tag,
-                            signal_ts=o.signal_ts)
+                            signal_ts=o.signal_ts,
+                            trailing_stop_pct=o.trailing_stop_pct,
+                            trailing_activation_pct=o.trailing_activation_pct,
+                            highest_px=px,
+                            initial_stop=o.stop)
         self.sim.register_entry(o.risk_pct)
         self.fills.append(Fill(b.ts, "buy", qty, ref, px, fee_base * px, qty * (px - ref),
                                "taker", o.tag or "entry"))
@@ -461,7 +519,9 @@ class Backtest:
         if p.stop is not None and b.l <= p.stop:
             ref = min(b.o, p.stop)  # гэп ниже стопа — исполнение по open, не по стопу
             px = floor_to_step(ref * (1 - costs.slip), spec.tick_sz)
-            self._close(px, ref, costs.taker_fee, "taker", "stop_loss", b.ts, i)
+            is_trailing = (p.trailing_stop_pct is not None and p.initial_stop is not None and p.stop > p.initial_stop)
+            reason = "trailing_stop" if is_trailing else "stop_loss"
+            self._close(px, ref, costs.taker_fee, "taker", reason, b.ts, i)
             return
         if p.take_profit is not None:
             through = spec.tick_sz if costs.limit_fill == "through" else 0.0
@@ -470,6 +530,15 @@ class Backtest:
                 self._close(p.take_profit, p.take_profit,
                             costs.maker_fee if maker else costs.taker_fee,
                             "maker" if maker else "taker", "take_profit", b.ts, i)
+                return
+        if p.trailing_stop_pct is not None:
+            if b.h > p.highest_px:
+                p.highest_px = b.h
+            act = p.trailing_activation_pct or 0.0
+            if p.highest_px >= p.entry_px * (1.0 + act):
+                new_stop = floor_to_step(p.highest_px * (1.0 - p.trailing_stop_pct), spec.tick_sz)
+                if p.stop is None or new_stop > p.stop:
+                    p.stop = new_stop
 
     def _close(self, px: float, ref: float, fee_rate: float, liquidity: str, reason: str,
                ts: int, i: int, exit_tag: str = "") -> None:
@@ -507,10 +576,14 @@ class Backtest:
 
     def _request_buy(self, i: int, stop: Optional[float], take_profit: Optional[float],
                      equity_pct: Optional[float], risk_pct: float,
-                     tag: str) -> tuple[bool, str]:
-        if stop is None and equity_pct is None:
-            raise ValueError("buy(): нужен stop (сайзинг риском) или equity_pct")
+                     tag: str,
+                     trailing_stop_pct: Optional[float] = None,
+                     trailing_activation_pct: Optional[float] = None) -> tuple[bool, str]:
+        if stop is None and equity_pct is None and trailing_stop_pct is None:
+            raise ValueError("buy(): нужен stop (сайзинг риском), trailing_stop_pct или equity_pct")
         b, spec, costs = self.bars[i], self.spec, self.costs
+        if stop is None and trailing_stop_pct is not None:
+            stop = round_to_step(b.c * (1.0 - trailing_stop_pct), spec.tick_sz)
         if i < self.trade_start:
             return self._reject(b.ts, "warmup")
         if self.pos is not None or self.pending is not None:
@@ -542,7 +615,8 @@ class Backtest:
         # остаток после комиссии в базе обязан оставаться продаваемым (>= minSz)
         if not qty or floor_to_step(qty * (1 - costs.taker_fee), spec.lot_sz) < spec.min_sz:
             return self._reject(b.ts, "sizing", "; ".join(warnings) or "размер < minSz")
-        self.pending = _Pending("buy", qty, stop, take_profit, risk_pct, tag, b.ts)
+        self.pending = _Pending("buy", qty, stop, take_profit, risk_pct, tag, b.ts,
+                                trailing_stop_pct, trailing_activation_pct)
         self.decisions.append(Decision(b.ts, "buy", f"accepted:qty={qty!r}"))
         return True, "ok"
 
@@ -565,6 +639,147 @@ class Backtest:
             self.pos.take_profit = None if px is None else ceil_to_step(px, tick)
             value = self.pos.take_profit
         self.decisions.append(Decision(self.bars[i].ts, "set_" + kind, repr(value)))
+
+    # --- Лимитные resting ордера и сеточный симулятор (GRID-BT-SIM) ---
+
+    def _check_resting_limits(self, b: Bar, ctx: Context, i: int) -> None:
+        if hasattr(self.strategy, "check_hard_stop"):
+            if self.strategy.check_hard_stop(b, ctx):
+                return
+
+        # 1. Buy orders: Low reached first ("low раньше high")
+        buys = [o for o in list(self.resting_orders.values()) if o.side == "buy" and b.l <= o.px]
+        buys.sort(key=lambda o: o.px, reverse=True)
+        for o in buys:
+            if o.order_id not in self.resting_orders:
+                continue
+            del self.resting_orders[o.order_id]
+            cost = o.qty * o.px
+            fee_rate = self.costs.maker_fee if "grid" in o.tag or self.costs.limit_fee == "maker" else self.costs.taker_fee
+            fee_base = o.qty * fee_rate
+            fee_quote_equiv = fee_base * o.px
+            self.cash -= cost
+            net_qty = o.qty - fee_base
+            self.inventory_qty += net_qty
+            fill = Fill(
+                ts=b.ts,
+                side="buy",
+                qty=o.qty,
+                ref_px=o.px,
+                exec_px=o.px,
+                fee=fee_quote_equiv,
+                slippage=0.0,
+                liquidity="maker",
+                reason=o.tag,
+            )
+            self.fills.append(fill)
+            self.decisions.append(Decision(b.ts, "fill_limit_buy", f"{o.order_id}@{o.px}"))
+            if hasattr(self.strategy, "on_fill"):
+                self.strategy.on_fill(fill, ctx)
+
+        # 2. Sell orders: High reached next
+        sells = [o for o in list(self.resting_orders.values()) if o.side == "sell" and b.h >= o.px]
+        sells.sort(key=lambda o: o.px)
+        for o in sells:
+            if o.order_id not in self.resting_orders:
+                continue
+            del self.resting_orders[o.order_id]
+            proceeds = o.qty * o.px
+            fee_rate = self.costs.maker_fee if "grid" in o.tag or self.costs.limit_fee == "maker" else self.costs.taker_fee
+            fee_quote = proceeds * fee_rate
+            self.cash += (proceeds - fee_quote)
+            self.inventory_qty -= o.qty
+            fill = Fill(
+                ts=b.ts,
+                side="sell",
+                qty=o.qty,
+                ref_px=o.px,
+                exec_px=o.px,
+                fee=fee_quote,
+                slippage=0.0,
+                liquidity="maker",
+                reason=o.tag,
+            )
+            self.fills.append(fill)
+            self.decisions.append(Decision(b.ts, "fill_limit_sell", f"{o.order_id}@{o.px}"))
+            if hasattr(self.strategy, "on_fill"):
+                self.strategy.on_fill(fill, ctx)
+
+    def _register_entry(self, i: int, risk_pct: float) -> tuple[bool, str]:
+        allowed, why = self.sim.check_entry()
+        if not allowed:
+            self.rejections[why] += 1
+            self.decisions.append(Decision(self.bars[i].ts, "register_entry", f"rejected:{why}"))
+            return False, why
+        self.sim.register_entry(risk_pct)
+        self.decisions.append(Decision(self.bars[i].ts, "register_entry", "accepted"))
+        return True, ""
+
+    def _place_limit(self, i: int, side: str, px: float, qty: float,
+                     count_as_entry: bool = True, tag: str = "") -> tuple[bool, str, int]:
+        spec = self.spec
+        px_adj = round_to_step(px, spec.tick_sz)
+        qty_adj = floor_to_step(qty, spec.lot_sz)
+        if qty_adj < spec.min_sz:
+            self.rejections["min_sz"] += 1
+            return False, f"qty {qty_adj} < min_sz {spec.min_sz}", 0
+        if count_as_entry:
+            allowed, why = self.sim.check_entry()
+            if not allowed:
+                self.rejections[why] += 1
+                return False, why, 0
+            self.sim.register_entry(risk.DEFAULT_RISK_PCT)
+
+        order_id = self._next_order_id
+        self._next_order_id += 1
+        order = _RestingLimit(order_id, side, px_adj, qty_adj, tag, i)
+        self.resting_orders[order_id] = order
+        self.decisions.append(Decision(self.bars[i].ts, f"limit_{side}", f"placed:{order_id}@{px_adj}"))
+        return True, "", order_id
+
+    def _cancel_limit(self, order_id: int) -> bool:
+        if order_id in self.resting_orders:
+            del self.resting_orders[order_id]
+            return True
+        return False
+
+    def _cancel_all_limits(self) -> int:
+        n = len(self.resting_orders)
+        self.resting_orders.clear()
+        return n
+
+    def _liquidate_inventory(self, ref_px: float, reason: str = "liquidate", i: int = None) -> None:
+        if self.inventory_qty <= 0:
+            return
+        qty = floor_to_step(self.inventory_qty, self.spec.lot_sz)
+        spec, costs = self.spec, self.costs
+        px = floor_to_step(ref_px * (1 - costs.slip), spec.tick_sz)
+        proceeds = qty * px
+        fee = proceeds * costs.taker_fee
+        slip_cost = qty * abs(ref_px - px)
+        self.cash += (proceeds - fee)
+        self.inventory_qty = 0.0
+        bar_ts = self.bars[i].ts if i is not None and 0 <= i < len(self.bars) else self.bars[-1].ts
+        fill = Fill(
+            ts=bar_ts,
+            side="sell",
+            qty=qty,
+            ref_px=ref_px,
+            exec_px=px,
+            fee=fee,
+            slippage=slip_cost,
+            liquidity="taker",
+            reason=reason,
+        )
+        self.fills.append(fill)
+        self.decisions.append(Decision(bar_ts, "liquidate_inventory", reason))
+
+    def _record_pnl(self, pnl: float) -> None:
+        self.sim.record_pnl(pnl)
+
+    def _block_instrument(self, hours: float = 4.0) -> None:
+        self.sim.block_instrument(hours)
+
 
 
 def run_backtest(bars: Sequence[Bar], strategy: Strategy, spec: InstrumentSpec,

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "settings": {
+    "model": "muse-spark-1.3",
+    "theme": "dark",
+    "reasoning": "visible",
+    "run.subagent_delegation_mode": "auto",
+    "run.workflow_trigger_mode": "auto"
+  },
+  "run": {
+    "subagent_delegation_mode": "auto",
+    "workflow_trigger_mode": "auto"
+  },
+  "runtime_capabilities": {
+    "observer_agents": true,
+    "parallel_workers": 10
+  }
+}

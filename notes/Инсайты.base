@@ -1,0 +1,48 @@
+# Инсайты агентов: insights/*.md по времени правки. Статус — из frontmatter `status`
+# (у новых из шаблона; у старых его нет — тогда только строка «**Статус:**» в тексте,
+# её показывает пульт notes/views/insights.js). Тема — автоформула по имени файла.
+filters:
+  and:
+    - file.inFolder("insights")
+    - file.ext == "md"
+formulas:
+  тема: 'if(file.name.startsWith("pump"), "памп", if(file.name.startsWith("live") || file.name.startsWith("guard"), "live и guard", if(file.name.startsWith("hunt") || file.name.startsWith("okx"), "исследования", "прочее")))'
+properties:
+  file.name:
+    displayName: Инсайт
+  status:
+    displayName: Статус
+  file.mtime:
+    displayName: Изменён
+  formula.тема:
+    displayName: Тема
+views:
+  - type: table
+    name: Недавние
+    order:
+      - file.name
+      - status
+      - formula.тема
+      - file.mtime
+    sort:
+      - property: file.mtime
+        direction: DESC
+  - type: table
+    name: Памп
+    filters:
+      and:
+        - file.name.startsWith("pump")
+    order:
+      - file.name
+      - status
+      - file.mtime
+    sort:
+      - property: file.mtime
+        direction: DESC
+  - type: cards
+    name: Карточки
+    order:
+      - file.name
+      - status
+      - formula.тема
+      - file.mtime

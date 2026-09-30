@@ -1,0 +1,55 @@
+[stdout]
+# Итог проверки по заявке d20260930-133914-0EFE
+
+## Главный результат
+**Проверить модули в репозитории напрямую невозможно: все 6 файлов пустые (0 байт) на диске.** Созданы 30.09 в 13:39:58, в git — untracked. Рядом лежат свежие `.pyc` (cpython-314, 13:37–13:38, 4–11 КБ) — содержимое существовало за 1–2 мин до обнуления. По AGENTS.md §5 файлы менялись <10 мин назад — возможно, их держит другой агент, поэтому **репозиторий не трогал, восстанавливать не стал** (выходит за «проверь»).
+
+Содержимое, показанное файловым слоем чтения (размеры побайтово совпали с исходным листингом: 8567/8361/5636 и 5392/5299/3153), собрал в изолированный стенд `/tmp/vrfy` (копии нетронутых deps из репо + стабы `ccxt`/`dotenv`, которых нет в системном Python) и прогнал тесты там.
+
+## Проверено
+- `python3 -u -m unittest tests.test_treasury tests.test_funding_carry tests.test_mean_reversion_strategy` (cwd=/tmp/vrfy): **Ran 18 tests — OK** (4+8+6).
+- Сверка чисел со спеками — расхождений нет:
+  - `funding_carry`: taker 0.30% / maker 0.20%, annualization rate×3×365, ×0.5 капиталоэффективность, выход при отрицательном funding — всё по [insights/funding-carry.md](insights/funding-carry.md) §2.1/§4–§6; owner-код `trd`, clOrdId 32 символа — по AGENTS.md §6.
+  - `mean_reversion`: RSI(14) cross 30/70, BB(20,2), ATR(14)×1.5, ROI-таблица 0/2.0–240/1.2–720/0.6–1440/0.0, owner `iex` — по `insights/meanrev-strategy-design.md` §5–§6.
+  - `treasury`: APY по умолчанию 3.5%, буфер 500, demo-симуляция вместо Earn — по `insights/idle-cash-earn.md` (estRate 3.5%, ошибка 50038 в demo).
+- Замечание (не блокер): `should_exit()` игнорирует параметр `position_age_days`.
+
+## Изменённые файлы
+- В репозитории: **нет** (только чтение + `cp` в /tmp).
+- Стенд (не коммитить, можно удалить): `/tmp/vrfy/src/{funding_carry,mean_reversion,treasury}.py`, `/tmp/vrfy/tests/test_{funding_carry,mean_reversion_strategy,treasury}.py`, `/tmp/vrfy/{ccxt,dotenv}.py`.
+
+## Команды и результаты
+| Команда | Результат |
+|---|---|
+| `wc -c src/funding_carry.py …` (6 файлов) | все 0 байт |
+| `git status --short -- <6 файлов>` | `??` (untracked), правок моих нет |
+| unittest 3 suites на /tmp-стенде | 18/18 OK |
+| `grep` спек funding-carry / meanrev-design / idle-cash-earn | числа модулей совпадают |
+
+## Доска / needs-user
+Задачи с ID заявки на `ops/board.md` нет — статус не менял. Рекомендация оркестратору: завести задачу на восстановление 6 файлов (содержимое известно, стенд в `/tmp/vrfy`), т.к. сейчас `unittest`-сбор в репо находит 0 тестов по этим модулям.
+
+[stderr]
+tbh: ignoring unknown top-level member in settings file at /home/ttt/.config/muse/settings.json: reason=unknown_member location=settings
+muse: workspace root: /mnt/c/TG/BOT/TRADE DEMO 1 (cwd default)
+muse: warning: rules file at /mnt/c/TG/BOT/TRADE DEMO 1/AGENTS.md exists, but the workspace is untrusted, so it is skipped for this session; restart with --trust-workspace to load project rules
+muse: Skills: 23 loaded · 1 warning
+muse:   .agents: project-skills-untrusted: project skills skipped because workspace is untrusted
+muse:   Run `muse skills list --source all` for full diagnostics.
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `parallel_workers` is malformed; capability is inactive: invalid type: integer `10`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: runtime capability `plugin:skill-reminder:reminder:skill-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:goal-reminder:reminder:goal-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:memory-reminder:reminder:memory-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:todo-reminder:reminder:todo-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:verify-reminder:reminder:verify-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:scope-reminder:reminder:scope-reminder` is inactive: reminder enablement settings are invalid
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+
+

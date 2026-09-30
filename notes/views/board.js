@@ -1,6 +1,6 @@
 // Доска ops/board.md по статусам — только чтение, доску правят агенты и человек.
-// Разбор таблиц повторяет parse_board из ops/hooks/autopilot.py: статус — первое слово ячейки,
-// «можно брать» = ready или наступивший scheduled, и все зависимости в done.
+// Разбор таблиц повторяет parse_board из ops/hooks/autopilot.py: статус — первое слово ячейки.
+// «Можно брать» = ready или наступивший scheduled, у которого закрыты все зависимости.
 // Вызов: await dv.view("notes/views/board", { show: ["needs-user"], notes: 220 })
 // Dataview не ждёт view с await и не показывает его ошибки, поэтому ошибки ловим сами.
 
@@ -117,10 +117,12 @@ try {
   const by = (status) => [...tasks.values()].filter((t) => t.status === status);
 
   const ready = by("ready");
-  const readyFree = ready.filter((t) => t.deps.every(done));
   const scheduled = by("scheduled").map((t) => ({ ...t, when: parseWhen(t.arg) }))
     .sort((a, b) => (a.when?.getTime() ?? Infinity) - (b.when?.getTime() ?? Infinity));
   const due = scheduled.filter((t) => t.when && t.when <= now);
+  const dueFree = due.filter((t) => t.deps.every(done));
+  const dueFreeIds = new Set(dueFree.map((t) => t.id));
+  const readyFree = [...ready.filter((t) => t.deps.every(done)), ...dueFree];
   const known = new Set(["needs-user", "blocked", "in-progress", "ready", "scheduled", "done"]);
   const other = [...tasks.values()].filter((t) => !known.has(t.status));
 
@@ -128,7 +130,7 @@ try {
     `🔴 needs-user **${by("needs-user").length}**`,
     `⛔ blocked **${by("blocked").length}**`,
     `🟡 in-progress **${by("in-progress").length}**`,
-    `🟢 ready **${ready.length}** (можно брать ${readyFree.length})`,
+    `🟢 ready **${ready.length}** + наступило **${dueFree.length}** (можно брать ${readyFree.length})`,
     `🕒 scheduled **${scheduled.length}** (наступило ${due.length})`,
     `✅ done **${by("done").length}**`,
   ];
@@ -157,11 +159,13 @@ try {
     section("🟡 В работе");
     dv.table(["ID", "Задача", "Кто, с", "Критерий готовности"], by("in-progress").map((t) => [t.id, t.title, t.arg || t.agent, short(t.criterion, opts.notes)]));
   }
-  if (show.has("ready") && ready.length) {
-    if (readyFree.length) {
-      section("🟢 Можно брать");
-      dv.table(["ID", "Задача", "Агент"], readyFree.map((t) => [t.id, t.title, t.agent]));
-    }
+  if (show.has("ready") && readyFree.length) {
+    section("🟢 Можно брать");
+    dv.table(["ID", "Задача", "Агент"], readyFree.map((t) => [
+      t.id, t.title, dueFreeIds.has(t.id) ? `${t.agent} · по расписанию с ${fmt(t.when)}` : t.agent,
+    ]));
+  }
+  if (show.has("ready")) {
     const waiting = ready.filter((t) => !t.deps.every(done));
     if (waiting.length) {
       section("⏳ Ждут зависимостей");
@@ -174,7 +178,8 @@ try {
       if (!t.when) return t.arg;
       if (t.when > now) return fmt(t.when);
       const waits = t.deps.filter((d) => !done(d));
-      return waits.length ? `${fmt(t.when)} — наступило, ждёт ${waits.join(", ")}` : `⏰ **${fmt(t.when)}** — наступило`;
+      if (waits.length) return `${fmt(t.when)} — наступило, ждёт ${waits.join(", ")}`;
+      return `⏰ **${fmt(t.when)}** — наступило, можно брать`;
     };
     dv.table(["ID", "Задача", "Агент", "Когда"], scheduled.map((t) => [t.id, t.title, t.agent, when(t)]));
   }

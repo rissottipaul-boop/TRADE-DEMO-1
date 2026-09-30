@@ -1,5 +1,5 @@
 ---
-name: 趋势线对称形态突破交易系统
+name: trendline-symmetry-breakout
 description: 基于有效顶底计数+对称结构+末端蓄势+实体突破的高确定性趋势交易系统，每15分钟触发一次，全市场扫描OKX USDT永续合约币种，优先捕捉1小时大周期+15分钟小周期的嵌套共振形态，经过6个月以上实盘验证，胜率稳定在65%以上
 version: 1.0
 license: MIT

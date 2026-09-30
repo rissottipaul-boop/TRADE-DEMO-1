@@ -1,0 +1,8 @@
+﻿{
+    "id":  "d20260930-155326-352E",
+    "prompt":  "Выведи в stdout одну строку: E2E-PING-OK. Ничего не меняй, файлы не трогай.",
+    "from":  "teamwork",
+    "timeout_min":  10,
+    "created":  "2026-09-30T15:53:26+05:00",
+    "role":  "ops-sentinel"
+}

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="control-token" content="__CONTROL_TOKEN__">
+  <title>Контур · Пульт проекта</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand"><div class="brand-mark">К</div><div><strong>КОНТУР</strong><small>OKX · demo control</small></div></div>
+      <nav aria-label="Разделы">
+        <a href="#overview" class="nav-link active">Обзор <span>01</span></a>
+        <a href="#tasks" class="nav-link">Задачи <span>02</span></a>
+        <a href="#runtimes" class="nav-link">Агенты <span>03</span></a>
+        <a href="#runs" class="nav-link">Запуски <span>04</span></a>
+        <a href="#events" class="nav-link">События <span>05</span></a>
+      </nav>
+      <div class="rail-bottom"><span class="live-dot"></span>Локальная панель<br><small>127.0.0.1 · без Flowise</small></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div class="breadcrumbs">ПРОЕКТ <span>/</span> УПРАВЛЕНИЕ</div>
+        <div class="top-actions"><span id="updated">Загрузка…</span><button id="refresh" class="ghost">Обновить ↗</button></div>
+      </header>
+
+      <section id="overview" class="hero">
+        <div><div class="eyebrow">AGENT CONTROL PLANE · ЛОКАЛЬНЫЙ УЗЕЛ</div><h1>Все процессы.<br><em>Один пульт.</em></h1><p>Состояние движка, работа агентов и очередь задач из источников проекта.</p></div>
+        <div class="hero-state"><span class="pulse"></span><span id="system-state">Проверяем состояние</span><small id="system-subtitle">Данные обновляются автоматически</small></div>
+      </section>
+
+      <section class="stats" aria-label="Основные показатели">
+        <article class="stat"><span>ДВИЖОК</span><strong id="engine-stat">—</strong><small id="engine-detail">Ожидание данных</small></article>
+        <article class="stat"><span>ЗАДАЧИ В РАБОТЕ</span><strong id="task-stat">—</strong><small id="task-detail">Доска проекта</small></article>
+        <article class="stat"><span>ОЧЕРЕДЬ MUSE</span><strong id="queue-stat">—</strong><small id="queue-detail">Заявки и результаты</small></article>
+        <article class="stat"><span>РИСК · DEMO</span><strong id="risk-stat">—</strong><small id="risk-detail">Снимок риск-ядра</small></article>
+      </section>
+
+      <section class="columns">
+        <article class="panel control-panel">
+          <div class="panel-head"><div><div class="eyebrow">ОПЕРАЦИИ</div><h2>Процессы</h2></div><span class="badge">ЛОКАЛЬНО</span></div>
+          <div class="process"><div><div class="process-name">Торговый движок <span id="engine-badge" class="pill">—</span></div><p id="engine-message">Ожидание состояния</p></div><div class="process-buttons"><button data-action="engine.start">Запустить</button><button data-action="engine.stop" class="soft">Остановить</button></div></div>
+          <div class="process"><div><div class="process-name">Muse runner <span id="muse-badge" class="pill">—</span></div><p id="muse-message">Очередь делегирования</p></div><div class="process-buttons"><button data-action="delegation.pause" class="soft">Пауза</button><button data-action="delegation.stop" class="soft">Остановить</button></div></div>
+          <div class="process"><div><div class="process-name">Мониторинг Netdata <span id="netdata-badge" class="pill">—</span></div><p id="netdata-message">Метрики хоста и алерты в реальном времени</p></div><div class="process-buttons"><a id="netdata-link" href="http://127.0.0.1:19999" target="_blank" rel="noopener noreferrer" class="netdata-btn">Открыть 19999</a></div></div>
+          <div class="notice">Запуск агентов и снятие паузы Muse появятся после проверки guard в каждом рантайме. Пульт не меняет торговые лимиты и решения человека.</div>
+
+        </article>
+        <article class="panel health-panel">
+          <div class="panel-head"><div><div class="eyebrow">СИСТЕМА</div><h2>Контроль</h2></div><span id="health-badge" class="badge">—</span></div>
+          <div id="health-list" class="health-list"></div>
+        </article>
+      </section>
+
+      <section id="tasks" class="panel section-panel">
+        <div class="panel-head"><div><div class="eyebrow">OPS / BOARD.MD</div><h2>Задачи проекта</h2></div><span id="tasks-count" class="badge">—</span></div>
+        <div class="filters"><input id="task-search" type="search" placeholder="Поиск по ID, задаче или агенту" aria-label="Поиск задач"><select id="task-filter" aria-label="Фильтр статуса"><option value="active">Активные</option><option value="all">Все</option><option value="ready">Готовые</option><option value="in-progress">В работе</option><option value="needs-user">Нужно решение</option><option value="blocked">Заблокированы</option><option value="scheduled">По расписанию</option><option value="done">Готово</option></select></div>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Задача</th><th>Исполнитель</th><th>Статус</th></tr></thead><tbody id="tasks-body"></tbody></table></div>
+        <p class="table-hint">Выберите ID, чтобы открыть критерий, заметки и план маршрутизации.</p>
+        <p id="duplicates" class="warning" hidden></p>
+      </section>
+
+      <section id="runtimes" class="panel section-panel">
+        <div class="panel-head"><div><div class="eyebrow">AGENT RUNTIMES</div><h2>Исполнители</h2></div><span class="badge">4 РАНТАЙМА</span></div>
+        <div id="runtime-grid" class="runtime-grid"></div>
+      </section>
+
+      <section id="runs" class="panel section-panel">
+        <div class="panel-head"><div><div class="eyebrow">AGENT RUNS · CONTROL PLANE</div><h2>Управление запусками</h2></div><span id="runs-count" class="badge">0 RUNS</span></div>
+        <div id="runs-list" class="event-list"></div>
+        <p class="table-hint">Идемпотентный запуск, статус живого процесса и отмена для поддерживаемых рантаймов (Codex).</p>
+      </section>
+
+      <section class="columns workspace-section">
+        <article class="panel"><div class="panel-head"><div><div class="eyebrow">PROCESS INVENTORY</div><h2>Процессы проекта</h2></div></div><div id="process-list" class="event-list"></div></article>
+        <article class="panel"><div class="panel-head"><div><div class="eyebrow">GIT WORKTREES</div><h2>Рабочие копии</h2></div></div><div id="worktree-list" class="event-list"></div></article>
+      </section>
+
+      <section id="events" class="columns events-section">
+        <article class="panel"><div class="panel-head"><div><div class="eyebrow">AGENT ROTATION</div><h2>Запуски агентов</h2></div></div><div id="rotation-list" class="event-list"></div></article>
+        <article class="panel"><div class="panel-head"><div><div class="eyebrow">MUSE QUEUE</div><h2>Заявки Muse</h2></div><select id="muse-filter" aria-label="Фильтр заявок Muse"><option value="all">Все стадии</option><option value="queued">Ожидают</option><option value="processing-unverified">В обработке</option><option value="finished">Завершены</option></select></div><div id="muse-results" class="event-list"></div><p class="table-hint">«В обработке» — стадия файла, не подтверждение живого процесса. Стоимость пока неизвестна.</p></article>
+      </section>
+      <section class="panel section-panel logs-panel"><div class="panel-head"><div><div class="eyebrow">LIVE LOGS</div><h2>Последние записи</h2></div><select id="log-select" aria-label="Выбор журнала"><option value="engine">Движок</option><option value="delegation">Делегирование</option></select></div><pre id="log-output">Нет записей</pre></section>
+      <footer>Контур · данные из файлов проекта · обновление каждые 10 секунд</footer>
+    </main>
+  </div>
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="task-drawer" class="task-drawer" aria-label="Карточка задачи" aria-modal="true" role="dialog" hidden>
+    <div class="drawer-top"><div class="eyebrow">КАРТОЧКА ЗАДАЧИ</div><button id="drawer-close" class="icon-button" aria-label="Закрыть карточку">×</button></div>
+    <div class="drawer-scroll">
+      <div id="detail-id" class="detail-id">—</div><h2 id="detail-title">Загрузка…</h2>
+      <div class="detail-meta"><span id="detail-status" class="pill">—</span><span id="detail-agent">—</span></div>
+      <div class="detail-block"><h3>Критерий готовности</h3><p id="detail-criterion"></p></div>
+      <div class="detail-block"><h3>Зависимости</h3><p id="detail-deps"></p></div>
+      <div class="detail-block"><h3>Заметки доски</h3><p id="detail-notes" class="detail-notes"></p></div>
+      <div class="detail-block"><h3>Передача задачи</h3><p class="subtle">Снимок доски, активных claims, Git и записей ротации. Новый агент сверяет состояние перед работой.</p>
+        <div class="handoff-actions"><button id="handoff-button" class="primary-button" type="button">Сформировать пакет</button><button id="handoff-copy" class="ghost" type="button" hidden>Скопировать</button></div>
+        <pre id="handoff-result" class="handoff-result" aria-live="polite" tabindex="0" hidden></pre>
+      </div>
+      <div class="detail-block planner-block"><h3>Маршрутизация агента</h3><p class="subtle">План показывает CLI и guard, не запускает модель.</p>
+        <div class="planner-fields"><label>Роль<select id="plan-role"></select></label><label>Рантайм<select id="plan-agent"><option value="auto">Автоматически</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini CLI</option><option value="muse">Muse Code</option></select></label></div>
+        <div class="handoff-actions"><button id="plan-button" class="primary-button" type="button">Построить план</button><button id="launch-button" class="primary-button" type="button" hidden>Запустить агента</button></div>
+        <div id="plan-result" class="plan-result" aria-live="polite"></div>
+      </div>
+    </div>
+  </aside>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

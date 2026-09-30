@@ -1,5 +1,6 @@
 // Флаги безопасности и признаки жизни движка — только чтение файлов, без сети и без биржи.
 // data/KILL и data/STOP_ENGINE — флаги движка (src/engine.py), logs/engine.log пишется раз в 60 с (сверка),
+// logs/autostart.log — сторож (раз в ~5 мин), data/AUTOSTART_OFF — его пауза,
 // ops/live-policy.json — окно live-торговли. Точный статус — `python -m src.ops status`.
 // Вызов: await dv.view("notes/views/safety")
 
@@ -34,6 +35,24 @@ try {
     const ageMin = Math.floor((now - log.mtime) / 60000);
     if (ageMin <= STALE_MIN) banner("okx-ok", `⚙️ Движок пишет лог: последняя запись ${fmt(new Date(log.mtime))} (${ageMin} мин назад).`);
     else banner("okx-warn", `⚙️ **Лог движка молчит ${ageMin} мин** (последняя запись ${fmt(new Date(log.mtime))}) — вероятно, движок остановлен. Проверка: \`ops\\engine.ps1 status\`.`);
+  }
+
+  const off = await readIf("data/AUTOSTART_OFF");
+  if (off !== null) banner("okx-warn", `⏸ **Автозапуск на паузе** — файл \`data/AUTOSTART_OFF\`: сторож и старт при входе отключены без удаления задач.`);
+
+  const watchText = await readIf("logs/autostart.log");
+  if (watchText === null) {
+    banner("okx-info", `👁 Сторож не писал в \`logs/autostart.log\` — задача «OKX-Bot Watchdog» не зарегистрирована (ENGINE-AUTOSTART-REG).`);
+  } else {
+    const lines = watchText.split(/\r?\n/).filter((l) => l.trim());
+    const ts = new Date((lines[lines.length - 1] || "").split(" ")[0]);
+    if (isNaN(ts)) {
+      banner("okx-warn", `👁 \`logs/autostart.log\` есть, но последняя строка без даты — сторож пишет не в своём формате.`);
+    } else {
+      const ageMin = Math.floor((now - ts) / 60000);
+      if (ageMin <= 15) banner("okx-ok", `👁 Сторож на дежурстве: последняя проверка ${fmt(ts)} (${ageMin} мин назад).`);
+      else banner("okx-warn", `👁 **Сторож молчит ${ageMin} мин** (последняя строка ${fmt(ts)}) — простой движка никто не подберёт.`);
+    }
   }
 
   const policyText = await readIf("ops/live-policy.json");

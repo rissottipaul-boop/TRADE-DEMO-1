@@ -42,6 +42,8 @@
 - Ключи демо создаются отдельно: Login → Trade → Demo Trading → Personal Center → Demo Trading API → Create Demo Trading API Key. Демо- и live-ключи разделять.
 - **Ограничения демо:** не поддерживаются withdraw, deposit, purchase/redemption и ряд других функций. Демо-ключи не истекают по неактивности (в отличие от live без IP-привязки).
 - Практический нюанс из `okx/agent-trade-kit` CHANGELOG: если клиент запущен в demo-режиме глобально, то и рыночные данные по умолчанию приходят из **симулированного** стакана; для получения реальных котировок при демо-торговле надо явно слать публичные market-запросы без заголовка. Важно для бэктестинга/сигналов: решить, какие данные считать «истиной».
+  - **Подтверждено (PUMP-FEED, 24.09):** эмпирикой и исходником okx CLI 1.4.8. С заголовком `x-simulated-trading: 1` публичные эндпоинты отдают отдельный симулированный рынок: 571 SPOT-инструмент против 1415 в live, свои сделки, стакан и свечи. Цена ликвидных пар привязана к live, объём и глубина — свои. Решение проекта: сигналы — по live-ленте, demo-лента — только там, где исполняется demo-ордер. Подробно — [pump-feed.md](pump-feed.md) §1 и §4. С PUMP-FEED-LIVE `src.pump_scanner` по умолчанию читает live (`--feed live`).
+  - **Скилл `.agents/skills/okx-cex-market/SKILL.md` в этом месте устарел** (строки 46 и 153). С CLI 1.3.0 `--demo` в market-командах = demo-лента, а не live. Файл — копия скилла OKX, его не правим.
 - В CCXT: `exchange.set_sandbox_mode(True)` выставляет заголовок; в python-okx — `flag="1"` в конструкторе каждого клиента.
 
 **Источники:**
@@ -218,7 +220,7 @@
 5. **checksum=0 на канале `books` и в демо, и в live** — единственная рабочая проверка целостности стакана: цепочка `seqId`/`prevSeqId` ([phase1-progress.md](phase1-progress.md)).
 6. **Каналы `candle*` живут на business-эндпоинте** (`/ws/v5/business`, логин не нужен); на public-эндпоинте отклоняются с ошибкой 60018 ([phase1-progress.md](phase1-progress.md)).
 7. **`POST /tradingBot/grid/min-investment` — только POST**; GET-вариант возвращает `code 3 "Operation not supported"` ([grid-bot-demo-run.md](grid-bot-demo-run.md) §4).
-8. **В демо-ленте бывают выбросы объёма ×1000** (напр. HBAR: бар 508 млн при норме ~0.5 млн) — при расчёте vol_ratio использовать медиану N баров, а не среднее ([pump-scan-2026-09-24.md](pump-scan-2026-09-24.md), скан №2).
+8. **В демо-ленте бывают выбросы объёма ×1000** (напр. HBAR: бар 508 млн при норме ~0.5 млн) — при расчёте vol_ratio использовать медиану N баров, а не среднее ([pump-scan-2026-09-24.md](pump-scan-2026-09-24.md), скан №2). Demo-лента — отдельный рынок: за сутки 14.8% плоских свечей, 8 из 45 live-пар в ней нет ([pump-feed.md](pump-feed.md) §2). Поэтому памп-сканер берёт сигналы из live-ленты, а универсум сверяет с demo `public/instruments` (PUMP-FEED-LIVE).
 9. **`GET /trade/order` (CCXT `spot get`) при нескольких fills возвращает `fillSz` только части объёма** (пример: 0.00391886 вместо 0.00591887), при этом `avgPx` корректен — сверку исполненного объёма делать через `fills` ([demo-slippage.md](demo-slippage.md) §7).
 10. **Средства нативного spot grid-бота остаются в торговом счёте как `frozenBal` и входят в `eq`/`totalEq`** (EQUITY-TOTAL, 08:12). Бот `3949248990629228544` (investment 400):
     - `curBaseSz` 0.002325518574 BTC = `frozenBal` BTC торгового счёта;
@@ -398,6 +400,18 @@
     **Цена demo против live (§9 п. 10), BTC-USDT-SWAP, 02:41:** last 84 432.5 против 84 428.9 (+0.004%). Спред на demo 36.4 (0.043%), на live 0.1. 1m-свечи × 100: пустых и плоских — 0 на обоих; отклонение close в среднем 0.0036%, максимум 0.037%. Для BTC-USDT-SWAP demo пригоден, на альтах повторять по чек-листу §6.4 `futures-bots.md`.
 
     **Итог по PnL (≈ 6 ч):** neutral `totalPnl` +0.209 (grid +0.211, fee −0.033, 8 арбитражей); long +0.381 (grid +0.270, float +0.111, fee −0.117, 9 арбитражей). **Не проверено:** база `slRatio` (§9 п. 5) — SL не срабатывал, остаётся MON-CFLEET.
+
+26. **История нативных ботов: `tradingBot/grid/orders-algo-history` и `tradingBot/dca/history-list`** (AUDIT-BOTS, demo, 30.09 02:30–02:45; эмпирика GET, ордеров нет). Методы ccxt 4.5.83 — `private_get_tradingbot_grid_orders_algo_history` и `private_get_tradingbot_dca_history_list`. Один `algoOrdType` за запрос (`grid`, `contract_grid` / `spot_dca`, `contract_dca`), `limit` 100, курсор `after` = `algoId`, записи от новых к старым по `cTime`. Остановленный бот есть в истории с `state=stopped`; время остановки — `uTime`, у grid есть `stopType` и `cancelType`. `algoClOrdId` и `tag` сохраняются: у ботов из `okx` CLI `tag=CLI` (у DCA — пусто). Бот, созданный давно и остановленный недавно, стоит в истории по `cTime`, поэтому в период попадает по `uTime`. На 30.09: 14 grid (11 `grid`, 3 `contract_grid`) и 7 DCA (6 `spot_dca`, 1 `contract_dca`), история за ≥ 6 суток доступна. Аудит — `python -m src.order_audit` (раздел «Боты»).
+27. **Дисклеймер TradFi на demo: XRP-USDT и AVAX-USDT по-прежнему закрыты, и не только для ботов** (TRADFI-DISCLAIMER, 30.09 03:02, OKX Trader; `acctLv 3`):
+    - **Признака без ордера нет.** `public/instruments` и приватный `account/instruments` (446 SPOT) показывают у обеих пар `state live`, флага «дисклеймер принят» нет. Есть только статичный признак категории: `instCategory "3"` (TradFi). В demo он стоит у 26 пар USDT: у токенов акций (AAPLX, TSLAX, XNVDA, XQQQ…), а также у XRP, AVAX, BCH и SCR. У ETH, SOL, SUI, ADA, TRX, ETC, APT, BNB, XLM, DOT, LTC, BTC и OKB — `"1"`, и на них боты 24.09 создались. Значит, заранее видно, каким парам нужен дисклеймер, но не видно, принят ли он.
+    - **Проба ордером:** post-only buy на 40% ниже рынка, `--tdMode cash`:
+      - XRP-USDT: 6 @ 0.8990, `clOrdId trdc2d8607a6b4d435a8fc5e373dc56b`;
+      - AVAX-USDT: 0.8 @ 6.879, `clOrdId trd476802a8d9eb413fb781695f37c24`.
+
+      Оба отклонены до создания: `ordId ""`, **`sCode 54092`** «Action required: Please go to the TradFi Perpetuals or Spot trading page on Web or App, and complete the disclaimer confirmation when prompted. If the prompt is not displayed in the current language, you may switch to another language environment and try again. Each main account and sub-account must accept the disclaimer separately before API trading can be enabled».
+    - **Проверка:** `trade/order?clOrdId=` → `51603` «Order does not exist» по обоим, `orders-pending` SPOT пуст, `liab` USDT 0.
+    - **Следствие.** У обычного ордера код `54092`, у создания бота — `55301` (п. 13), причина одна. Дисклеймер действует на аккаунт, а не только на ботов, и на demo-аккаунте он **не принят**: ответ человека 25.09 «кажется, сделал» не подтвердился. Вероятно, дисклеймер приняли в live-режиме: demo — отдельный аккаунт, а OKX требует принять его на каждом аккаунте. Бот для проверки не создавался: вывод ясен уже по ордеру.
+    - Ни `54092`, ни `55301` нет в `errors.ERROR_MAP`. Ордер с `tdMode cash` при `acctLv 3` получил `54092`, а не `51000` (п. 22): проверку дисклеймера OKX делает раньше проверки tdMode.
 
 ## Открытые вопросы
 

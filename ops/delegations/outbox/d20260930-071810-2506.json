@@ -1,0 +1,10 @@
+{
+  "output_tail": "[stdout]\r\n\r\n[stderr]\r\nfailed to read --prompt-file C:\\TG\\BOT\\TRADE DEMO 1\\ops\\delegations\\processing\\d20260930-071810-2506.prompt.md: No such file or directory (os error 2)\n\r\n",
+  "error": "muse exit 1",
+  "elapsed_s": 1,
+  "killed": true,
+  "finished": "2026-09-30T07:18:27+05:00",
+  "exit_code": 1,
+  "id": "d20260930-071810-2506",
+  "status": "error"
+}

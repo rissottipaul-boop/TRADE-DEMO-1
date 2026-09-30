@@ -1,9 +1,12 @@
-"""Памп-сканер PUMP-CODIFY + ликвидность кандидата PUMP-LIQ (src/pump_scanner.py): без сети.
+"""Памп-сканер PUMP-CODIFY + ликвидность кандидата PUMP-LIQ + лента live PUMP-FEED-LIVE
+(src/pump_scanner.py): без сети.
 
 «Биржа» — фейковый публичный REST OKX в памяти с семантикой candles/history-candles:
 новые свечи первыми, первая строка — формирующаяся (confirm=0), after — строго старше ts;
 books отдаёт снимок стакана (по умолчанию DEFAULT_BOOK — глубокий и узкий, тестам без
-интереса к ликвидности не мешает). Запросы идут через настоящий OkxPublicClient (троттлинг
+интереса к ликвидности не мешает); public/instruments — пары demo (по умолчанию все пары
+tickers в state=live). run_main подставляет ту же фейковую биржу и как demo-ленту; раздельные
+ленты — в FeedLiveTest. Запросы идут через настоящий OkxPublicClient (троттлинг
 и повторы не подменяются). pump-pocket.json в тестах — временный файл (pocket_file);
 setUpModule подменяет путь по умолчанию на крошечную позицию — реальный проектный файл
 тесты не читают.
@@ -79,9 +82,14 @@ def closes_of(rows):
     return [float(r[4]) for r in rows if r[8] == "1"]
 
 
+MIN = 60_000
+SCAN_DELAY = 5 * MIN     # скан через 5 мин после закрытия свечи: сигнал свежий (PUMP-STALE, 15 мин)
+
+
 def now_after(rows):
-    """Момент внутри формирующейся свечи (через 30 мин после её открытия)."""
-    return int(rows[-1][0]) + H // 2 if rows[-1][8] == "0" else int(rows[-1][0]) + H + H // 2
+    """Момент внутри формирующейся свечи (через SCAN_DELAY после её открытия)."""
+    return (int(rows[-1][0]) + SCAN_DELAY if rows[-1][8] == "0"
+            else int(rows[-1][0]) + H + SCAN_DELAY)
 
 
 # --- Стакан и карман (PUMP-LIQ) ---
@@ -90,6 +98,18 @@ def fake_book(asks, bids, ts=T0):
     """[(px, sz), …] по ask/bid -> ответ market/books (снимок; тот же формат, что у OKX)."""
     fmt = lambda levels: [[repr(px), repr(sz)] for px, sz in levels]
     return {"asks": fmt(asks), "bids": fmt(bids), "ts": str(ts)}
+
+
+def book_mid(book):
+    return (float(book["asks"][0][0]) + float(book["bids"][0][0])) / 2
+
+
+def deep_book_at(mid, half_spread_pct=0.01, size_usdt=1e9):
+    """Глубокая узкая книга вокруг mid: demo-книга, которая проходит все проверки (demo-цена,
+    глубина, спред), — чтобы тест проверял только live-книгу."""
+    k = half_spread_pct / 100
+    ask, bid = mid * (1 + k), mid * (1 - k)
+    return fake_book([(ask, size_usdt / ask)], [(bid, size_usdt / bid)])
 
 
 # Глубокий узкий стакан: не мешает тестам, которым проверка ликвидности безразлична.
@@ -111,21 +131,26 @@ def vol_quote_of(rows, inst_id="A-USDT"):
 
 
 class FakeOkx:
-    """Opener для OkxPublicClient: tickers, candles, history-candles, books в памяти.
-    books без явного значения для пары -> DEFAULT_BOOK."""
+    """Opener для OkxPublicClient: tickers, instruments, candles, history-candles, books в памяти.
+    books без явного значения для пары -> DEFAULT_BOOK; instruments=None -> все пары tickers
+    в state=live."""
 
-    def __init__(self, series=None, tickers=None, errors=None, books=None):
+    def __init__(self, series=None, tickers=None, errors=None, books=None, instruments=None,
+                 last=None):
         self.series = series or {}
         self.tickers = tickers or []
-        self.errors = errors or {}           # instId или "tickers" -> исключение или payload
+        self.errors = errors or {}           # instId, "tickers" или "instruments" -> исключение/payload
         self.books = books or {}             # instId -> снимок market/books (fake_book(...))
-        self.urls = []
+        self.instruments = instruments       # [{"instId", "state"}] — ответ public/instruments
+        self.last = last or {}               # instId -> last market/ticker (по умолчанию close
+        self.urls = []                       # последней закрытой свечи: сигнал не «отдан»)
 
     def __call__(self, url, timeout):
         self.urls.append(url)
         parts = urllib.parse.urlsplit(url)
         q = dict(urllib.parse.parse_qsl(parts.query))
-        key = "tickers" if parts.path == "/api/v5/market/tickers" else q.get("instId")
+        key = {"/api/v5/market/tickers": "tickers",
+               "/api/v5/public/instruments": "instruments"}.get(parts.path, q.get("instId"))
         err = self.errors.get(key)
         if isinstance(err, Exception):
             raise err
@@ -133,6 +158,11 @@ class FakeOkx:
             return json.dumps(err).encode()
         if parts.path == "/api/v5/market/tickers":
             return self._ok(self.tickers)
+        if parts.path == "/api/v5/public/instruments":
+            if self.instruments is not None:
+                return self._ok(self.instruments)
+            return self._ok([{"instType": "SPOT", "instId": t["instId"], "state": "live"}
+                             for t in self.tickers])
         if parts.path in ("/api/v5/market/candles", "/api/v5/market/history-candles"):
             if key not in self.series:
                 return json.dumps({"code": "51001", "msg": "Instrument ID does not exist",
@@ -141,7 +171,21 @@ class FakeOkx:
             rows = [r for r in self.series[key] if after is None or int(r[0]) < after]
             return self._ok(list(reversed(rows))[: int(q.get("limit", "100"))])
         if parts.path == "/api/v5/market/books":
-            return self._ok([self.books.get(key, DEFAULT_BOOK)])
+            book = self.books.get(key, DEFAULT_BOOK)
+            if book is None:                                 # пары нет в этой ленте
+                return json.dumps({"code": "51001", "msg": "Instrument ID does not exist",
+                                   "data": []}).encode()
+            return self._ok([book])
+        if parts.path == "/api/v5/market/ticker":
+            if key in self.last:
+                last = self.last[key]
+            elif key in self.series:
+                last = closes_of(self.series[key])[-1]
+            else:
+                return json.dumps({"code": "51001", "msg": "Instrument ID does not exist",
+                                   "data": []}).encode()
+            return self._ok([{"instType": "SPOT", "instId": key, "last": repr(last),
+                              "ts": str(T0)}])
         raise AssertionError(f"неожиданный эндпоинт: {parts.path}")
 
     @staticmethod
@@ -160,10 +204,12 @@ def ticker(inst, vol):
     return {"instType": "SPOT", "instId": inst, "last": "1", "volCcy24h": str(vol)}
 
 
-def run_main(argv, fake, now_ms):
+def run_main(argv, fake, now_ms, demo_fake=None):
+    """CLI на фейковой бирже; demo_fake — отдельная demo-лента (по умолчанию та же fake)."""
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
-        code = ps.main(argv, client=client_for(fake), now_ms=now_ms)
+        code = ps.main(argv, client=client_for(fake), now_ms=now_ms,
+                       demo_client=client_for(demo_fake if demo_fake is not None else fake))
     return code, out.getvalue(), err.getvalue()
 
 
@@ -422,7 +468,7 @@ class RankingTest(unittest.TestCase):
         self.assertEqual(by_id["E-USDT"]["failed"][:2], ["impulse", "volume"])
         self.assertAlmostEqual(by_id["A-USDT"]["score"], 9.0, places=3)
         self.assertEqual(report["counts"], {"scanned": 6, "candidates": 2, "near": 2,
-                                            "insufficient": 1, "stale": 0})
+                                            "insufficient": 1, "stale": 0, "no_data": 0})
         self.assertTrue(report["note"].startswith("Кандидатов 2 из 6: B-USDT"))
         text = ps.render_text(report)
         self.assertIn("Почти кандидаты (не хватило одного условия): C-USDT, D-USDT", text)
@@ -536,7 +582,7 @@ class UniverseTest(unittest.TestCase):
         series = {i: make_rows(40) for i in ("OKB-USDT", "LTC-USDT")}
         fake = FakeOkx(series, tickers=self.TICKERS)
         report = ps.run_scan(client_for(fake), top_n=2, exclude=["ETH", "SOL"],
-                             now_ms=now_after(series["OKB-USDT"]))
+                             now_ms=now_after(series["OKB-USDT"]), demo_client=client_for(fake))
         self.assertEqual(report["pairs"], ["OKB-USDT", "LTC-USDT"])
         candle_ids = [dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query))["instId"]
                       for u in fake.urls if "candles" in u]
@@ -571,7 +617,7 @@ class JournalAndExitTest(unittest.TestCase):
         self.assertEqual(lines[2], "")                            # строка = одна запись + \n
         rec = json.loads(lines[0])
         self.assertEqual((rec["event"], rec["source"], rec["v"], rec["feed"]),
-                         ("scan", "src.pump_scanner", 1, "demo"))
+                         ("scan", "src.pump_scanner", 1, "live"))           # лента по умолчанию
         self.assertEqual(rec["candle_ts"], ps.iso_utc(T0 + 98 * H))
         self.assertEqual(rec["pairs"], ["A-USDT", "C-USDT"])
         self.assertEqual([c["inst_id"] for c in rec["candidates"]], ["A-USDT"])
@@ -616,7 +662,7 @@ class JournalAndExitTest(unittest.TestCase):
     def test_http_403_and_api_error_exit_2(self):
         http403 = urllib.error.HTTPError("https://www.okx.com", 403, "Forbidden", {}, None)
         for errors in ({"tickers": http403},
-                       {"A-USDT": {"code": "51001", "msg": "Instrument ID does not exist"}}):
+                       {"A-USDT": {"code": "51000", "msg": "Parameter instId error"}}):
             with self.subTest(errors=list(errors)):
                 argv = ["--no-journal"] + ([] if "tickers" in errors else ["--pairs", "A-USDT"])
                 code, _, err = run_main(argv, FakeOkx(self.rows, errors=errors), self.now)
@@ -704,14 +750,17 @@ class LiquidityTest(unittest.TestCase):
     """check_liquidity/apply_liquidity: стакан market/books против позиции кармана P."""
 
     def scan(self, rows, inst_id="A-USDT", position=None, books=None):
-        """run_scan с временным карманом; position по умолчанию — заведомо ликвидная позиция."""
+        """run_scan с временным карманом; position по умолчанию — заведомо ликвидная позиция.
+        Demo-книга (PUMP-DEMO-GUARD) — глубокая узкая на live-mid: проверяется только live."""
         vq = vol_quote_of(rows, inst_id)
         position = vq / 100 if position is None else position
-        fake = FakeOkx({inst_id: rows}, books=books or {})
+        books = books or {}
+        fake = FakeOkx({inst_id: rows}, books=books)
+        demo = FakeOkx(books={i: deep_book_at(book_mid(b)) for i, b in books.items()})
         with tempfile.TemporaryDirectory() as tmp:
             pocket = pocket_file(tmp, position)
             report = ps.run_scan(client_for(fake), pairs=[inst_id], now_ms=now_after(rows),
-                                 pocket=pocket)
+                                 pocket=pocket, demo_client=client_for(demo))
         return report, fake
 
     def test_liquid_candidate_passes(self):
@@ -832,7 +881,8 @@ class LiquidityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pocket = pocket_file(tmp)
             report = ps.run_scan(client_for(fake), pairs=list(series),
-                                 now_ms=max(now_after(r) for r in series.values()), pocket=pocket)
+                                 now_ms=max(now_after(r) for r in series.values()), pocket=pocket,
+                                 demo_client=client_for(FakeOkx()))
         self.assertEqual(set(report["near"]), {"NEAR-USDT"})
         requested = {dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query))["instId"]
                     for u in fake.urls if urllib.parse.urlsplit(u).path == "/api/v5/market/books"}
@@ -851,6 +901,429 @@ class LiquidityTest(unittest.TestCase):
         self.assertEqual(row["failed"], [])                     # прошёл фильтр пяти условий
         self.assertEqual(row["status"], "illiquid")
         self.assertEqual(set(row["liquidity"]["failed"]), {"depth", "turnover"})
+
+
+# --- Лента live, универсум ∩ demo, пара без данных (PUMP-FEED-LIVE) ---
+
+class FeedLiveTest(unittest.TestCase):
+    # live: 6 подходящих пар по убыванию volCcy24h; в demo нет GONE, SUSP — не торгуется
+    LIVE_TICKERS = [ticker("BTC-USDT", 9e9), ticker("GONE-USDT", 8e9), ticker("OKB-USDT", 7e9),
+                    ticker("SUSP-USDT", 6e9), ticker("LTC-USDT", 5e9), ticker("PEPE-USDT", 4e9),
+                    ticker("AAA-USDT", 3e9), ticker("USDC-USDT", 9e9)]
+    DEMO_INSTRUMENTS = [{"instId": i, "instType": "SPOT", "state": st} for i, st in (
+        ("BTC-USDT", "live"), ("OKB-USDT", "live"), ("SUSP-USDT", "suspend"),
+        ("LTC-USDT", "live"), ("PEPE-USDT", "live"), ("AAA-USDT", "live"), ("ZZZ-USDT", "live"))]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.journal = Path(self._tmp.name) / "pump_journal.jsonl"
+        self.series = {i: make_rows(99) for i in ("OKB-USDT", "LTC-USDT", "PEPE-USDT", "AAA-USDT")}
+        self.now = now_after(self.series["OKB-USDT"])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def fakes(self, **demo_kw):
+        live = FakeOkx(self.series, tickers=self.LIVE_TICKERS)
+        demo = FakeOkx(instruments=demo_kw.get("instruments", self.DEMO_INSTRUMENTS))
+        return live, demo
+
+    def test_default_feed_is_live(self):
+        self.assertEqual(ps.build_parser().parse_args([]).feed, "live")
+        live, demo = self.fakes()
+        made = []
+
+        def make_client(feed):
+            made.append(feed)
+            return client_for({"live": live, "demo": demo}[feed])
+
+        out = io.StringIO()
+        with mock.patch.object(ps, "make_client", side_effect=make_client), redirect_stdout(out):
+            code = ps.main(["--top", "3", "--journal", str(self.journal)], now_ms=self.now)
+        self.assertEqual(code, 0)
+        self.assertEqual(made, ["live", "demo"])
+        # demo — только пары и стакан кандидатов (PUMP-DEMO-GUARD); свечи, тикеры — live
+        self.assertEqual(set(demo.paths()), {"/api/v5/public/instruments", "/api/v5/market/books"})
+        self.assertNotIn("/api/v5/public/instruments", live.paths())
+        rec = json.loads(self.journal.read_text(encoding="utf-8"))
+        self.assertEqual(rec["feed"], "live")
+        self.assertEqual(rec["pairs"], ["OKB-USDT", "LTC-USDT", "PEPE-USDT"])
+        self.assertIn("лента live", out.getvalue())
+
+    def test_universe_is_live_top_n_within_demo(self):
+        live, demo = self.fakes()
+        code, out, _ = run_main(["--top", "3", "--json", "--no-journal"], live, self.now, demo)
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        # GONE (нет в demo) и SUSP (state≠live) выпали, топ-3 добран следующими по объёму
+        self.assertEqual(report["pairs"], ["OKB-USDT", "LTC-USDT", "PEPE-USDT"])
+        u = report["universe"]
+        self.assertEqual((u["eligible"], u["demo_instruments"], u["not_in_demo"]), (4, 6, 2))
+        self.assertEqual(u["not_in_demo_top"], ["GONE-USDT", "SUSP-USDT"])
+        self.assertEqual(report["counts"]["scanned"], 3)
+        text = ps.render_text(report)
+        self.assertIn("без BTC: 6 → есть в demo (state=live, 6 пар): 4", text)
+        self.assertIn("нет в demo: GONE-USDT, SUSP-USDT", text)
+
+    def test_without_intersection_select_universe_unchanged(self):
+        pairs, info = ps.select_universe(self.LIVE_TICKERS, top_n=3)
+        self.assertEqual(pairs, ["GONE-USDT", "OKB-USDT", "SUSP-USDT"])
+        self.assertNotIn("demo_instruments", info)
+
+    def test_demo_feed_skips_instruments(self):
+        fake = FakeOkx(self.series, tickers=self.LIVE_TICKERS)
+        code, out, _ = run_main(["--feed", "demo", "--top", "3", "--journal", str(self.journal)],
+                                fake, self.now)
+        self.assertEqual(code, 0)
+        self.assertNotIn("/api/v5/public/instruments", fake.paths())
+        rec = json.loads(self.journal.read_text(encoding="utf-8"))
+        self.assertEqual(rec["feed"], "demo")
+        self.assertNotIn("demo_instruments", rec["universe"])
+
+    def test_pair_without_data_gets_status_not_exit_2(self):
+        code, out, _ = run_main(["--pairs", "OKB-USDT", "GONE-USDT", "--journal",
+                                 str(self.journal)], FakeOkx(self.series), self.now)   # GONE → 51001
+        self.assertEqual(code, 0)
+        self.assertIn("Нет в ленте live (OKX 51001): GONE-USDT", out)
+        rec = json.loads(self.journal.read_text(encoding="utf-8"))
+        self.assertEqual(rec["counts"]["no_data"], 1)
+        self.assertEqual([c["inst_id"] for c in rec["candidates"]], ["OKB-USDT"])
+        self.assertIn("нет в ленте live: GONE-USDT", rec["note"])
+        code, out, _ = run_main(["--pairs", "OKB-USDT", "GONE-USDT", "--json", "--no-journal"],
+                                FakeOkx(self.series), self.now)
+        report = json.loads(out)
+        self.assertEqual((report["no_data"], report["stale"]), (["GONE-USDT"], []))
+        row = report["results"][-1]
+        self.assertEqual((row["inst_id"], row["status"], row["bars"]), ("GONE-USDT", "no_data", 0))
+        self.assertIn("51001", row["reasons"][0])
+
+    def test_pair_without_data_in_replay(self):
+        at = int(self.series["OKB-USDT"][-2][0]) + H + 60_000
+        code, out, _ = run_main(["--feed", "demo", "--at", ps.iso_local(at), "--pairs",
+                                 "OKB-USDT", "GONE-USDT", "--json"], FakeOkx(self.series),
+                                self.now)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["no_data"], ["GONE-USDT"])
+
+    def test_bad_demo_instruments_exit_2(self):
+        for instruments in ([], [{"instId": "OKB-USDT", "state": "suspend"}]):
+            with self.subTest(instruments=instruments):
+                live, demo = self.fakes(instruments=instruments)
+                code, out, err = run_main(["--journal", str(self.journal)], live, self.now, demo)
+                self.assertEqual(code, 2)
+                self.assertIn("public/instruments", err)
+                self.assertFalse(self.journal.exists())
+
+    def test_live_universe_requires_demo_client(self):
+        with self.assertRaises(ValueError):
+            ps.run_scan(client_for(FakeOkx(self.series, tickers=self.LIVE_TICKERS)),
+                        now_ms=self.now)
+
+    def test_opener_allows_instruments_with_demo_header(self):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = b'{"code":"0","data":[]}'
+        with mock.patch.object(ps.urllib.request, "urlopen", return_value=resp) as urlopen:
+            ps.make_opener("demo")("https://www.okx.com/api/v5/public/instruments?instType=SPOT", 5)
+        req = urlopen.call_args[0][0]
+        self.assertEqual((req.get_method(), req.get_header("X-simulated-trading")), ("GET", "1"))
+
+
+# --- Проверка demo-цены: сигнал live, исполнение demo (PUMP-DEMO-GUARD) ---
+
+class DemoGuardTest(unittest.TestCase):
+    """Live-книга — DEFAULT_BOOK (mid 99.975, глубокая); demo-книга задаётся в каждом тесте.
+    Кейсы из insights/pump-feed.md §2 и §4 п. 2: ZEC — demo-цена «застыла» (отклонение 74%),
+    ETC — живая demo-пара."""
+
+    LIVE_MID = book_mid(DEFAULT_BOOK)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.pocket = pocket_file(self._tmp.name, 1_000.0)   # 3×P = 3k USDT, 5×P оборота = 5k
+        self.rows = make_rows(99, last_vol_mult=3.0)
+        # оборот сигнальной свечи ≈ 3k USDT при P = 1000 — мал; поднимаем объём свечей
+        self.rows = [r[:7] + [repr(float(r[7]) * 100)] + r[8:] for r in self.rows]
+        self.now = now_after(self.rows)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def scan(self, demo_books, inst="A-USDT", feed="live", spread_max=0.5, **kw):
+        live = FakeOkx({inst: self.rows})
+        demo = FakeOkx(books=demo_books)
+        report = ps.run_scan(client_for(live), pairs=[inst], now_ms=self.now, pocket=self.pocket,
+                             feed=feed, demo_client=client_for(demo),
+                             liq_rules=ps.LiquidityRules(spread_max=spread_max), **kw)
+        return report, live, demo
+
+    def test_dead_demo_pair_zec_rejected(self):
+        """ZEC: demo-mid отстаёт от live-mid на 74% — кандидат не проходит, статус demo_price."""
+        dead = deep_book_at(self.LIVE_MID * (1 - 0.74))
+        report, _, _ = self.scan({"ZEC-USDT": dead}, inst="ZEC-USDT")
+        self.assertEqual(report["candidates"], [])
+        self.assertEqual(report["demo_price"], ["ZEC-USDT"])
+        row = report["results"][0]
+        self.assertEqual(row["status"], "demo_price")
+        self.assertEqual(row["failed"], [])                       # фильтр пяти условий пройден
+        liq = row["liquidity"]
+        self.assertFalse(liq["checks"]["demo_price"])
+        self.assertEqual(liq["failed"], ["demo_price"])          # глубина и спред demo — в норме
+        self.assertAlmostEqual(liq["demo_dev_pct"], 74.0, places=2)
+        self.assertTrue(row["reasons"][0].startswith("demo-цена:"), row["reasons"])
+        self.assertIn("74.00% > 0.5%", row["reasons"][0])
+        self.assertIn("ZEC-USDT — demo-цена", report["note"])
+        text = ps.render_text(report)
+        self.assertIn("DEMO-ЦЕНА: demo-цена: demo-mid", text)
+        self.assertIn("Demo-цена не прошла (фильтр пройден, demo-книга мёртвая или отстаёт): "
+                      "ZEC-USDT", text)
+
+    def test_live_demo_pair_etc_passes(self):
+        """ETC: demo-книга живая, demo-mid = live-mid + 0.1% — кандидат проходит."""
+        alive = deep_book_at(self.LIVE_MID * 1.001)
+        report, _, demo = self.scan({"ETC-USDT": alive}, inst="ETC-USDT")
+        self.assertEqual(report["candidates"], ["ETC-USDT"])
+        self.assertEqual(report["demo_price"], [])
+        liq = report["results"][0]["liquidity"]
+        self.assertTrue(liq["ok"])
+        self.assertTrue(all(liq["checks"].values()), liq["checks"])
+        self.assertAlmostEqual(liq["demo_dev_pct"], 0.1, places=3)
+        self.assertAlmostEqual(liq["live_mid"], self.LIVE_MID)
+        self.assertTrue(report["liquidity"]["demo_guard"])
+        self.assertEqual(demo.paths(), ["/api/v5/market/books"])  # demo — только стакан
+
+    def test_one_sided_or_empty_demo_book(self):
+        """Сейчас (30.09) у ZEC в demo стакан пуст; однобокий стакан — та же причина."""
+        cases = {"пусто": (fake_book([], []), "нет заявок"),
+                 "только bid": (fake_book([], [(99.9, 1e6)]), "нет асков"),
+                 "только ask": (fake_book([(100.0, 1e6)], []), "нет бидов")}
+        for name, (book, why) in cases.items():
+            with self.subTest(case=name):
+                report, _, _ = self.scan({"A-USDT": book})
+                row = report["results"][0]
+                self.assertEqual(row["status"], "demo_price")
+                self.assertEqual(row["reasons"][0],
+                                 f"demo-цена: demo-стакан не двусторонний ({why})")
+                self.assertIsNone(row["liquidity"]["demo_dev_pct"])
+
+    def test_pair_missing_in_demo(self):
+        report, _, _ = self.scan({"A-USDT": None})               # demo books → 51001
+        row = report["results"][0]
+        self.assertEqual(row["status"], "demo_price")
+        self.assertEqual(row["reasons"][0], "demo-цена: пары нет в demo (OKX 51001)")
+
+    def test_threshold_is_spread_max_inclusive(self):
+        for dev, spread_max, status in ((0.5, 0.5, "candidate"), (0.51, 0.5, "demo_price"),
+                                        (0.8, 1.0, "candidate"), (1.5, 1.0, "demo_price")):
+            with self.subTest(dev=dev, spread_max=spread_max):
+                book = deep_book_at(self.LIVE_MID * (1 + dev / 100))
+                report, _, _ = self.scan({"A-USDT": book}, spread_max=spread_max)
+                self.assertEqual(report["results"][0]["status"], status)
+        # отклонение вниз считается по модулю
+        report, _, _ = self.scan({"A-USDT": deep_book_at(self.LIVE_MID * 0.99)})
+        self.assertEqual(report["results"][0]["status"], "demo_price")
+
+    def test_depth_and_spread_checked_on_demo_book(self):
+        """Глубина и спред PUMP-LIQ — по обеим книгам: live в норме, demo — нет -> illiquid."""
+        mid = self.LIVE_MID
+        thin = fake_book([(mid * 1.0001, 1.0)], [(mid * 0.9999, 1.0)])          # ≈ 100 USDT
+        report, _, _ = self.scan({"A-USDT": thin})
+        row = report["results"][0]
+        self.assertEqual(row["status"], "illiquid")
+        self.assertEqual(row["liquidity"]["failed"], ["demo_depth"])
+        self.assertTrue(row["reasons"][0].startswith("demo: глубина ask до +1%"), row["reasons"])
+        # спред demo 0.8% при mid = live-mid: цена проходит, спред — нет
+        wide = fake_book([(mid * 1.004, 1e7)], [(mid * 0.996, 1e7)])
+        report, _, _ = self.scan({"A-USDT": wide})
+        row = report["results"][0]
+        self.assertEqual(row["status"], "illiquid")
+        self.assertEqual(row["liquidity"]["failed"], ["demo_spread"])
+        self.assertIn("demo: спред 0.80% > 0.5%", row["reasons"][0])
+
+    def test_turnover_only_from_live_candle(self):
+        """Оборот — по live-свече: demo-свечи не запрашиваются, недостаток оборота — live."""
+        report, _, demo = self.scan({"A-USDT": deep_book_at(self.LIVE_MID)})
+        self.assertNotIn("/api/v5/market/candles", demo.paths())
+        liq = report["results"][0]["liquidity"]
+        self.assertEqual(liq["turnover_usdt"], _sig(vol_quote_of(self.rows)))
+        big = pocket_file(self._tmp.name, vol_quote_of(self.rows))            # оборот 1×P < 5×P
+        live = FakeOkx({"A-USDT": self.rows}, books={"A-USDT": fake_book(
+            [(100.0, 1e7)], [(99.95, 1e7)])})
+        report = ps.run_scan(client_for(live), pairs=["A-USDT"], now_ms=self.now, pocket=big,
+                             demo_client=client_for(FakeOkx(books={"A-USDT": deep_book_at(
+                                 99.975)})))
+        self.assertEqual(report["results"][0]["liquidity"]["failed"], ["turnover"])
+
+    def test_demo_price_reason_comes_first(self):
+        """Мёртвая demo-пара и неликвидная live-книга: статус demo_price, её причина первой."""
+        live_thin = fake_book([(100.0, 1.0)], [(99.95, 1.0)])
+        live = FakeOkx({"A-USDT": self.rows}, books={"A-USDT": live_thin})
+        demo = FakeOkx(books={"A-USDT": deep_book_at(50.0)})
+        report = ps.run_scan(client_for(live), pairs=["A-USDT"], now_ms=self.now,
+                             pocket=self.pocket, demo_client=client_for(demo))
+        row = report["results"][0]
+        self.assertEqual(row["status"], "demo_price")
+        self.assertEqual(row["liquidity"]["failed"], ["demo_price", "depth"])
+        self.assertTrue(row["reasons"][0].startswith("demo-цена:"))
+
+    def test_near_keeps_status_with_demo_mark(self):
+        rows = [r[:7] + [repr(float(r[7]) * 100)] + r[8:] for r in make_rows(99, last_pct=1.0)]
+        live = FakeOkx({"N-USDT": rows})
+        demo = FakeOkx(books={"N-USDT": deep_book_at(self.LIVE_MID * 0.5)})
+        report = ps.run_scan(client_for(live), pairs=["N-USDT"], now_ms=now_after(rows),
+                             pocket=self.pocket, demo_client=client_for(demo))
+        self.assertEqual(report["near"], ["N-USDT"])
+        self.assertEqual(report["results"][0]["liquidity"]["failed"], ["demo_price"])
+        self.assertIn("· demo-цена", ps.render_text(report))
+
+    def test_demo_feed_and_replay_without_guard(self):
+        report, live, demo = self.scan({"A-USDT": deep_book_at(10.0)}, feed="demo")
+        self.assertFalse(report["liquidity"]["demo_guard"])
+        self.assertEqual(report["candidates"], ["A-USDT"])     # книга ленты demo и есть demo
+        self.assertEqual(demo.urls, [])
+        self.assertIsNone(report["results"][0]["liquidity"]["checks"]["demo_price"])
+        at = self.now
+        live = FakeOkx({"A-USDT": self.rows})
+        demo = FakeOkx(books={"A-USDT": deep_book_at(10.0)})
+        report = ps.run_scan(client_for(live), pairs=["A-USDT"], at_ms=at, now_ms=at,
+                             pocket=self.pocket, demo_client=client_for(demo))
+        self.assertFalse(report["liquidity"]["demo_guard"])
+        self.assertEqual(demo.urls, [])
+
+    def test_live_guard_requires_demo_client(self):
+        with self.assertRaises(ValueError):
+            ps.run_scan(client_for(FakeOkx({"A-USDT": self.rows})), pairs=["A-USDT"],
+                        now_ms=self.now, pocket=self.pocket)
+
+    def test_cli_journal_and_demo_api_error(self):
+        journal = Path(self._tmp.name) / "pump_journal.jsonl"
+        live = FakeOkx({"ZEC-USDT": self.rows})
+        demo = FakeOkx(books={"ZEC-USDT": deep_book_at(self.LIVE_MID * 0.26)})
+        with mock.patch.object(ps, "POCKET_PATH", self.pocket):
+            code, out, _ = run_main(["--pairs", "ZEC-USDT", "--journal", str(journal)], live,
+                                    self.now, demo)
+        self.assertEqual(code, 0)
+        self.assertIn("DEMO-ЦЕНА", out)
+        rec = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(rec["candidates"], [])
+        self.assertEqual([r["inst_id"] for r in rec["demo_price"]], ["ZEC-USDT"])
+        self.assertAlmostEqual(rec["demo_price"][0]["liquidity"]["demo_dev_pct"], 74.0, places=2)
+        self.assertTrue(rec["liquidity"]["demo_guard"])
+        # другая ошибка OKX на demo-книге — ошибка скана (код 2), не молчаливый пропуск
+        demo_err = FakeOkx(errors={"ZEC-USDT": {"code": "51000", "msg": "Parameter error"}})
+        with mock.patch.object(ps, "POCKET_PATH", self.pocket):
+            code, _, err = run_main(["--pairs", "ZEC-USDT", "--no-journal"],
+                                    FakeOkx({"ZEC-USDT": self.rows}), self.now, demo_err)
+        self.assertEqual(code, 2)
+        self.assertIn("OkxApiError", err)
+
+
+# --- Свежесть сигнала (PUMP-STALE) ---
+
+class FreshnessTest(unittest.TestCase):
+    """Кейс скана 30.09 02:54: ICP-USDT — кандидат через 54 мин после закрытия свечи, цена
+    −0.95% от её close."""
+
+    def setUp(self):
+        self.rows = make_rows(99)
+        self.close = closes_of(self.rows)[-1]
+        self.closed_at = int(self.rows[-2][0]) + H          # закрытие сигнальной свечи
+
+    def scan(self, delay_min, last=None, inst="ICP-USDT", **kw):
+        fake = FakeOkx({inst: self.rows}, last={} if last is None else {inst: last})
+        report = ps.run_scan(client_for(fake), pairs=[inst],
+                             now_ms=self.closed_at + delay_min * MIN, **kw)
+        return report, fake
+
+    def test_too_old_signal_is_stale(self):
+        report, _ = self.scan(54)
+        self.assertEqual(report["candidates"], [])
+        self.assertEqual(report["stale"], ["ICP-USDT"])
+        row = report["results"][0]
+        self.assertEqual(row["status"], "stale")
+        self.assertEqual(row["failed"], [])                           # фильтр пройден
+        self.assertEqual(row["reasons"],
+                         ["сигнал устарел: 54 мин после закрытия свечи > 15 мин"])
+        self.assertEqual(row["freshness"]["age_min"], 54.0)
+        self.assertEqual(report["freshness"]["max_age_min"], 15.0)
+        self.assertIn("СИГНАЛ УСТАРЕЛ", ps.render_text(report))
+
+    def test_price_below_signal_close_is_stale(self):
+        last = self.close * (1 - 0.0095)
+        report, _ = self.scan(5, last=last)
+        row = report["results"][0]
+        self.assertEqual(row["status"], "stale")
+        self.assertEqual(len(row["reasons"]), 1)
+        self.assertTrue(row["reasons"][0].startswith("цена ниже close сигнальной свечи"))
+        self.assertIn("(-0.95%)", row["reasons"][0])
+        self.assertAlmostEqual(row["freshness"]["vs_close_pct"], -0.95, places=4)
+
+    def test_both_reasons(self):
+        report, _ = self.scan(54, last=self.close * 0.99)
+        self.assertEqual(len(report["results"][0]["reasons"]), 2)
+
+    def test_fresh_signal_stays_candidate(self):
+        for delay, last in ((5, None), (15, None), (1, self.close * 1.02)):
+            with self.subTest(delay=delay, last=last):
+                report, fake = self.scan(delay, last=last)
+                self.assertEqual(report["candidates"], ["ICP-USDT"])
+                self.assertTrue(report["results"][0]["freshness"]["ok"])
+                self.assertIn("/api/v5/market/ticker", fake.paths())
+        report, _ = self.scan(16)
+        self.assertEqual(report["stale"], ["ICP-USDT"])
+
+    def test_max_age_is_parameter(self):
+        code, out, _ = run_main(["--pairs", "ICP-USDT", "--max-age-min", "60", "--json",
+                                 "--no-journal"], FakeOkx({"ICP-USDT": self.rows}),
+                                self.closed_at + 54 * MIN)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["candidates"], ["ICP-USDT"])
+        self.assertEqual(ps.build_parser().parse_args([]).max_age_min, 15.0)
+
+    def test_only_candidates_checked_and_stale_gets_no_book(self):
+        series = {"ICP-USDT": self.rows, "NEAR-USDT": make_rows(99, last_pct=1.0)}
+        fake = FakeOkx(series)
+        with tempfile.TemporaryDirectory() as tmp:
+            report = ps.run_scan(client_for(fake), pairs=list(series),
+                                 now_ms=self.closed_at + 54 * MIN, pocket=pocket_file(tmp),
+                                 demo_client=client_for(FakeOkx()))
+        ticker_ids = [dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query))["instId"]
+                      for u in fake.urls if "/market/ticker?" in u]
+        book_ids = [dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query))["instId"]
+                    for u in fake.urls if "/market/books" in u]
+        self.assertEqual(ticker_ids, ["ICP-USDT"])          # near свежесть не проверяет
+        self.assertEqual(book_ids, ["NEAR-USDT"])           # stale — без стакана
+        self.assertEqual((report["stale"], report["near"]), (["ICP-USDT"], ["NEAR-USDT"]))
+
+    def test_replay_does_not_check_freshness(self):
+        at = self.closed_at + 47 * MIN
+        report, fake = self.scan(47, at_ms=at)
+        self.assertEqual(report["candidates"], ["ICP-USDT"])
+        self.assertFalse(report["freshness"]["enabled"])
+        self.assertNotIn("/api/v5/market/ticker", fake.paths())
+
+    def test_journal_keeps_stale_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "pump_journal.jsonl"
+            code, _, _ = run_main(["--pairs", "ICP-USDT", "--journal", str(journal)],
+                                  FakeOkx({"ICP-USDT": self.rows}), self.closed_at + 54 * MIN)
+            rec = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(rec["counts"]["stale"], 1)
+        self.assertEqual(rec["stale"][0]["inst_id"], "ICP-USDT")
+        self.assertEqual(rec["stale"][0]["freshness"]["age_min"], 54.0)
+        self.assertIn("сигнал устарел", rec["stale"][0]["reasons"][0])
+        self.assertEqual(rec["freshness"]["max_age_min"], 15.0)
+
+    def test_check_freshness_unit(self):
+        closed = T0 + H
+        f = ps.check_freshness(T0, 100.0, 100.0, closed + 15 * MIN)
+        self.assertTrue(f["ok"])
+        f = ps.check_freshness(T0, 100.0, 99.0, closed + 20 * MIN, max_age_min=30)
+        self.assertEqual((f["ok"], f["age_min"], f["vs_close_pct"]), (False, 20.0, -1.0))
+
+
+def _sig(x):
+    return ps._sig(x)
 
 
 if __name__ == "__main__":

@@ -15,17 +15,22 @@ Guard продолжает блокировать то, что необрати�
 - прямые SQL-правки баз состояния и рекурсивное удаление ключевых каталогов/баз.
 
 Вход — JSON на stdin: {"tool_name": ..., "tool_input": {...}}.
+Codex, Gemini CLI и Muse Code вызывают guard через ops/hooks/guard_adapter.py: он приводит
+их форматы (apply_patch в command, cmd/argv, вложенные вызовы, BeforeTool, пути WSL)
+к этому входу и отвечает в формате клиента (AGENT-GUARD-COMPAT).
 Выход — JSON с permissionDecision="deny" (понимают и VS Code, и Claude Code)
 или пустой вывод (разрешено). Сбой самого guard — пропуск с записью в лог:
 баг guard не должен останавливать всю работу агентов.
 """
 import json
 import os
+import posixpath
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 LIVE_POLICY = ROOT / "ops" / "live-policy.json"
@@ -33,8 +38,9 @@ GUARD_LOG = Path(os.environ.get("AGENT_GUARD_LOG") or ROOT / "data" / "guard.log
 OKX_CONFIG = Path.home() / ".okx" / "config.toml"
 
 # Файлы-периметр: их меняет только человек
-GUARDRAIL_FILES = {"ops/live-policy.json", "ops/autopilot.json", "pump-pocket.json", ".claude/settings.json"}
-GUARDRAIL_DIRS = ("ops/hooks/", ".github/hooks/")
+GUARDRAIL_FILES = {"ops/live-policy.json", "ops/live-pocket.json", "ops/autopilot.json", "pump-pocket.json",
+                   ".claude/settings.json", ".gemini/settings.json", ".muse/hooks.json", ".muse/settings.json"}
+GUARDRAIL_DIRS = ("ops/hooks/", ".github/hooks/", ".muse/", ".codex/")
 RISK_FILE = "src/risk.py"
 
 # Лимиты риск-ядра: направление, в котором изменение ОСЛАБЛЯЕТ защиту
@@ -64,7 +70,8 @@ DENY_COMMAND_RULES: list[tuple[re.Pattern, str]] = [
      "Сброс kill-switch/breaker делает только человек: `python -m src.ops reset ...`."),
     (re.compile(r"(?<![\w.])\.env(?![\w.-])"),
      "Файл .env с ключами агентам не читается и не меняется."),
-    (re.compile(r"dotenv_values|os\.environ|printenv|\benv:\s*okx|\$okx_|%okx_|"
+    # $env:OKX_MODE — не секрет: без исключения аварийный kill с этим префиксом невозможен
+    (re.compile(r"dotenv_values|os\.environ|printenv|\benv:\s*okx(?!_mode\b)|\$okx_|%okx_|"
                 r"okx_(demo_)?(api_key|secret|passphrase)"),
      "Вывод переменных окружения с ключами запрещён."),
     (re.compile(r"\.okx[/\\]config\.toml"),
@@ -80,11 +87,30 @@ DENY_COMMAND_RULES: list[tuple[re.Pattern, str]] = [
 
 
 def _norm_path(path: str) -> str:
-    """Путь → относительный от корня проекта, прямые слэши, нижний регистр."""
-    p = path.replace("\\", "/").strip().strip('"').lower()
+    """Путь → относительный от корня проекта, прямые слэши, нижний регистр.
+
+    Формы, которые передают инструменты: Windows (C:\\..., c:/...), Git Bash (/c/...),
+    URI VS Code (file:///c%3A/...), префикс \\\\?\\, кавычки, ./ и .\\, сегменты ./ и ../
+    """
+    p = path.strip().strip("\"'")
+    if p.lower().startswith("file:"):
+        p = unquote(urlparse(p).path)  # file:///c%3A/x → /c:/x
+        if re.match(r"^/[a-zA-Z]:", p):
+            p = p[1:]
+    p = p.replace("\\", "/")
+    if p.startswith("//?/"):
+        p = p[4:]
+    drive = re.match(r"^/([a-zA-Z])(/.*)?$", p)  # Git Bash: /c/TG → c:/TG
+    if drive:
+        p = f"{drive.group(1)}:{drive.group(2) or '/'}"
+    if p:
+        p = posixpath.normpath(p)  # ops/./hooks, src/../ops/hooks → ops/hooks
+    p = p.lower()
     root = str(ROOT).replace("\\", "/").lower().rstrip("/") + "/"
     if p.startswith(root):
         p = p[len(root):]
+    elif p == root.rstrip("/"):
+        p = "."
     return p[2:] if p.startswith("./") else p
 
 
@@ -94,7 +120,8 @@ def _is_env_file(rel: str) -> bool:
 
 
 def _is_guardrail(rel: str) -> bool:
-    return rel in GUARDRAIL_FILES or rel.startswith(GUARDRAIL_DIRS)
+    # normpath срезает хвостовой слэш: сам каталог ops/hooks тоже периметр
+    return rel in GUARDRAIL_FILES or rel.startswith(GUARDRAIL_DIRS) or rel + "/" in GUARDRAIL_DIRS
 
 
 def load_live_policy(path: Path = LIVE_POLICY) -> dict:
@@ -152,8 +179,55 @@ def is_live_command(cmd: str, okx_profiles: tuple[Optional[str], set[str]]) -> b
     return name is not None and name not in {p.lower() for p in demo}
 
 
+# GUARD-LIVE-PATCH. Live-вызов проверяется целиком, без цепочек: иначе «безопасное» начало
+# команды протащит опасное продолжение. OKX_MODE=live — только префиксом в начале команды.
+_LIVE_PREFIX = re.compile(r"^\s*(\$env:okx_mode\s*=\s*[\"']?live[\"']?\s*;|(env\s+)?okx_mode=[\"']?live[\"']?)\s*")
+_CHAIN = re.compile(r"[;&|`\n\r<>]|\$\(")
+_PY_M = r"(\S*/)?(python(3)?(\.exe)?|py)\s+-m\s+"
+_OPS_EMERGENCY = re.compile(rf"^{_PY_M}src\.ops\s+(kill|status)\b")
+_LIVE_READONLY = re.compile(rf"^({_PY_M}src\.live_preflight\b|(\S*/)?ops/live\.ps1\s+(status|stop)\b)")
+_LIVE_START = re.compile(rf"{_PY_M}src\.live_runner\b|ops/live\.ps1\s+start\b")
+# okx CLI в live: разрешены отмена, остановка, закрытие и чтение — без единого слова входа
+_OKX_FIRST = re.compile(r"^(\S*/)?okx(\.cmd|\.exe)?\s")
+_OKX_SAFE = re.compile(r"\b(cancel[\w-]*|stop|close-position|balance|positions?|orders?|get|list|details|"
+                       r"history|fills|bills|ticker|status)\b")
+_OKX_RISKY = re.compile(r"\b(place|amend|create|transfer|withdraw\S*|borrow|repay|leverage|set-\S+|margin|"
+                        r"adjust\S*|subscribe|purchase|redeem|switch|config|auth)\b|--side\b|--sz\b")
+
+
+def check_live_command(low: str, policy: dict) -> Optional[str]:
+    """Причина запрета live-команды или None. Аварийные и читающие команды — и вне окна."""
+    prefixed = _LIVE_PREFIX.match(low)
+    rest = low[prefixed.end():] if prefixed else low
+    chained = bool(_CHAIN.search(rest))
+    if re.search(r"okx_mode\W{0,4}live", low):
+        if not prefixed or chained or re.search(r"okx_mode\W{0,4}live", rest):
+            return ("OKX_MODE=live — только префиксом одной команды без цепочек: "
+                    "`$env:OKX_MODE='live'; python -m src.ops kill \"причина\"`.")
+        if _OPS_EMERGENCY.match(rest) or _LIVE_READONLY.match(rest):
+            return None
+        if _LIVE_START.match(rest):
+            return None if live_allowed(policy) else (
+                "Live-окно ops/live-policy.json закрыто — live-runner не запускается.")
+        return ("OKX_MODE=live — только для точек входа src.live_* и аварийных src.ops kill/status. "
+                "Live-входы идут через src.live_runner (риск-ядро), не из CLI и не из других модулей.")
+    if _OKX_FIRST.match(rest) and not chained and _OKX_SAFE.search(rest) and not _OKX_RISKY.search(rest):
+        return None  # аварийное действие или чтение в live — разрешено всегда
+    return ("Live через okx CLI — только отмена, остановка ботов, закрытие позиций и чтение, по одной "
+            "команде. Входы в live — только src.live_runner через риск-ядро (business-plan.md §3).")
+
+
+# AGENT-GUARD-COMPAT: в корне проекта пробелы («TRADE DEMO 1»), и правило `> путь` рвёт абсолютный путь
+# на пробеле. Корень в тексте команды сводится к относительному пути: WSL, Windows, Git Bash.
+_ROOT_WIN = str(ROOT).replace("\\", "/").lower().rstrip("/") + "/"
+_ROOT_FORMS = tuple(dict.fromkeys([re.sub(r"^([a-z]):", r"/mnt/\1", _ROOT_WIN), _ROOT_WIN,
+                                   re.sub(r"^([a-z]):", r"/\1", _ROOT_WIN)]))
+
+
 def check_command(cmd: str, policy: dict, okx_profiles) -> Optional[str]:
     low = cmd.lower().replace("\\", "/")
+    for root_form in _ROOT_FORMS:
+        low = low.replace(root_form, "")
     for pattern, reason in DENY_COMMAND_RULES:
         if pattern.search(low):
             return reason
@@ -183,9 +257,10 @@ def check_command(cmd: str, policy: dict, okx_profiles) -> Optional[str]:
                 r"(^|\s)(\.|\*|/|~|c:/?)(\s|$)", low):
             return "Рекурсивное удаление ключевых каталогов проекта запрещено."
 
-    if is_live_command(low, okx_profiles) and not live_allowed(policy):
-        return ("Live-торговля выключена политикой ops/live-policy.json (включает только человек). "
-                "Используйте --demo / demo-профиль.")
+    if _LIVE_START.search(low) and not live_allowed(policy):
+        return "Live-окно ops/live-policy.json закрыто — live-runner не запускается."
+    if is_live_command(low, okx_profiles):
+        return check_live_command(low, policy)
     return None
 
 

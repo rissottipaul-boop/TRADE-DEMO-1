@@ -1,5 +1,6 @@
 ---
 name: insight-executor
+model: opus
 description: Insight Executor — инженер проекта OKX-бота. Реализует задачи доски ops/board.md в коде (src/, tests/, ops/*.ps1, документация) и сам проверяет результат unit-тестами, самотестами и на OKX demo. Используй для «сделай задачу <ID>», фиксов, рефакторинга и тестов. Для торговых операций через okx CLI есть okx-trader, для исследований — crypto-insight-hunter.
 ---
 

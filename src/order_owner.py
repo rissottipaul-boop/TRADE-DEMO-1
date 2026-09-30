@@ -14,13 +14,14 @@
   `--tag` нет: tag всегда `CLI` (у MCP-ядра — `MCP`), а `--aiBuilderCode`
   подменяет tag кодом атрибуции OKX — для метки владельца не годится;
 - ручной ордер человека из веб-интерфейса или приложения: clOrdId и tag пустые.
+- нативный бот OKX без --algoClOrdId: исполнения с clOrdId O+19 цифр (см. src/pnl_ledger.py BOT_CL_ORD_RE) — в ledger падают в default_sleeve, боты тегируйте через order_owner new.
 
 Правила префиксов:
 - clOrdId — до 32 символов, только [a-z0-9] (connector.new_client_order_id);
 - корень `bot` — код проекта, который пишет свои ордера в storage. Для
   реконсилятора и live-preflight это «свои» (reconciler.is_own_order =
-  startswith("bot")). Движок ставит `bot` + uuid hex, подвладельцы — `bot` +
-  НЕ-hex буква (g–z), поэтому их clOrdId не спутать с clOrdId движка;
+  startswith("bot")). Движок ставит `bot` + uuid hex, в хвосте подвладельца
+  после `bot` есть НЕ-hex буква (g–z) — его не спутать с clOrdId движка;
 - `botl*` — только live-карман (src.live_runner);
 - остальные префиксы для реконсилятора внешние: тесты, агенты с CLI, человек.
 Владелец по clOrdId — самый длинный зарегистрированный префикс.
@@ -45,6 +46,8 @@ KINDS = ("engine", "strategy", "live", "test", "agent", "human")
 # --- Коды владельцев (префиксы clOrdId) ---
 ENGINE = "bot"          # движок: connector.new_client_order_id() по умолчанию
 ROUTER = "botr"         # OrderRouter, стратегия не назвала владельца
+CARRY = "botcar"        # Funding Carry (src.carry_executor)
+MR = "botmr"            # Mean Reversion (src.mr_trader)
 DCA = "botsdca"         # DCA-бот demo (src.dca_bot)
 DCA_DEMO_RUN = "bottdca"  # прогон DCA-бота src.dca_demo_run
 LIVE_DCA = "botldca"    # рукав dca live-кармана (src.live_runner)
@@ -82,6 +85,8 @@ OWNERS: tuple[Owner, ...] = (
     Owner(ENGINE, "Движок src/engine.py", "Insight Executor", "engine",
           "connector.new_client_order_id() по умолчанию; до ORDER-OWNER-TAG так же метил и OrderRouter"),
     Owner(ROUTER, "src/order_router.py — стратегия без своего владельца", "Insight Executor", "strategy"),
+    Owner(CARRY, "Funding Carry src/carry_executor.py", "Insight Executor", "strategy"),
+    Owner(MR, "Mean Reversion src/mr_trader.py", "Insight Executor", "strategy"),
     Owner(DCA, "DCA-бот demo src/dca_bot.py", "Insight Executor", "strategy"),
     Owner(DCA_DEMO_RUN, "Прогон DCA-бота src/dca_demo_run.py", "Insight Executor", "test",
           "через OrderRouter: ордера пишутся в storage движка"),
@@ -139,9 +144,10 @@ def validate_registry(owners: tuple[Owner, ...] = OWNERS) -> list[str]:
             problems.append(f"{o.code!r}: префикс {LIVE_FAMILY!r} — только у kind=live")
     for a in codes:
         for b in codes:
-            # a + uuid hex не должен совпасть с префиксом b: следующий символ b — не hex
-            if a != b and b.startswith(a) and b[len(a)] in _HEX:
-                problems.append(f"{b!r} продолжает {a!r} hex-символом {b[len(a)]!r} — "
+            # clOrdId кода a — это a + uuid hex: b коллидирует с a, только если
+            # ВЕСЬ хвост b после a — hex (напр. bota; у botcar хвост car — нет)
+            if a != b and b.startswith(a) and all(c in _HEX for c in b[len(a):]):
+                problems.append(f"{b!r} продолжает {a!r} hex-хвостом {b[len(a):]!r} — "
                                 f"clOrdId {a!r}+uuid будет принят за {b!r}")
     return problems
 

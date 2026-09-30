@@ -1,0 +1,35 @@
+# Мои ответы на needs-user: notes/decisions/<ID>.md (кнопка «Ответить» на пульте).
+# status: новое — оркестратор ещё не перенёс на доску; перенесено — решение в заметках задачи.
+filters:
+  and:
+    - file.inFolder("notes/decisions")
+    - file.ext == "md"
+properties:
+  task:
+    displayName: Задача
+  date:
+    displayName: Дата
+  status:
+    displayName: Статус
+views:
+  - type: table
+    name: Ещё не на доске
+    filters:
+      and:
+        - status == "новое"
+    order:
+      - task
+      - date
+      - status
+    sort:
+      - property: date
+        direction: DESC
+  - type: table
+    name: Все
+    order:
+      - task
+      - date
+      - status
+    sort:
+      - property: date
+        direction: DESC

@@ -59,3 +59,62 @@
   white-space: nowrap;
   cursor: pointer;
 }
+
+/* Живая панель notes/views/live.js: шкалы «значение против лимита» и график equity */
+.okx-panel {
+  margin: 0.3em 0 0.6em;
+}
+.okx-meter-row {
+  display: grid;
+  grid-template-columns: 9em minmax(6em, 16em) 1fr;
+  align-items: center;
+  gap: 0.6em;
+  margin: 0.25em 0;
+  font-size: 0.92em;
+}
+.okx-meter-label {
+  color: var(--text-muted);
+}
+.okx-meter {
+  position: relative;
+  height: 0.7em;
+  border-radius: 4px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+.okx-meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+}
+.okx-meter-fill.okx-ok { background: var(--color-green); }
+.okx-meter-fill.okx-warn { background: var(--color-orange); }
+.okx-meter-fill.okx-danger { background: var(--color-red); }
+.okx-meter-fill.okx-info { background: var(--color-blue); }
+.okx-list {
+  margin: 0.3em 0;
+}
+.okx-bad {
+  color: var(--color-red);
+  font-weight: 600;
+}
+.okx-chart {
+  width: 100%;
+  height: 150px;
+  border-radius: 4px;
+  background: var(--background-secondary);
+}
+.okx-chart-line {
+  fill: none;
+  stroke: var(--interactive-accent);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+.okx-chart-hwm {
+  stroke: var(--text-faint);
+  stroke-dasharray: 4 4;
+  vector-effect: non-scaling-stroke;
+}
+@media (max-width: 600px) {
+  .okx-meter-row { grid-template-columns: 1fr; gap: 0.15em; }
+}

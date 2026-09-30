@@ -12,8 +12,16 @@
   Листаем без `begin`: от новых к старым курсором `after` до первого ордера старше
   начала периода. С `begin` OKX отдаёт страницы от старых к новым, и `after`
   повторяет уже полученные (demo, 24.09) — см. insights/okx-api.md §10.
-Суб-ордера нативных grid/DCA-ботов OKX в orders-history не попадают (demo, 24.09):
-ботов этот аудит не проверяет.
+Суб-ордера нативных grid/DCA-ботов OKX в orders-history не попадают (demo, 24.09) —
+поэтому боты читаются отдельно (AUDIT-BOTS), по algoClOrdId самого бота:
+- активные — connector.fetch_grid_bots / fetch_dca_bots (grid, contract_grid, spot_dca,
+  contract_dca);
+- история — tradingBot/grid/orders-algo-history и tradingBot/dca/history-list, курсор
+  after = algoId от новых к старым; в отчёт — боты, работавшие в периоде (uTime или
+  cTime не раньше начала периода). Остановленные — отдельным списком.
+Бот без метки (нет algoClOrdId и tag) — warning и на demo: ручной бот человека
+неотличим от бота чужой сессии, а бот торгует сам (инцидент 30.09 02:40). До
+order_owner.RULE_SINCE — info legacy, как у ордеров.
 
 Классификация — src.order_owner.classify:
 - свой префикс clOrdId/algoClOrdId → группа владельца (ok);
@@ -38,7 +46,8 @@ from typing import Any, Iterable, Optional
 
 from . import order_owner
 from .config import load_settings
-from .connector import create_exchange, fetch_pending_algos, fetch_pending_orders
+from .connector import (create_exchange, fetch_dca_bots, fetch_grid_bots, fetch_pending_algos,
+                        fetch_pending_orders)
 
 log = logging.getLogger("okx.order_audit")
 
@@ -52,6 +61,16 @@ LIST_LIMIT = 30             # строк на раздел без --verbose
 
 DETAIL_KEYS = ("ordId", "algoId", "clOrdId", "algoClOrdId", "tag", "instId", "side", "ordType",
                "sz", "px", "state", "category", "cTime")
+BOT_DETAIL_KEYS = ("algoId", "algoClOrdId", "tag", "instId", "algoOrdType", "state", "cTime", "uTime",
+                   "stopType", "investment", "lever")
+
+# (algoOrdType, активные, метод истории ccxt)
+BOT_SOURCES = (
+    ("grid", fetch_grid_bots, "private_get_tradingbot_grid_orders_algo_history"),
+    ("contract_grid", fetch_grid_bots, "private_get_tradingbot_grid_orders_algo_history"),
+    ("spot_dca", fetch_dca_bots, "private_get_tradingbot_dca_history_list"),
+    ("contract_dca", fetch_dca_bots, "private_get_tradingbot_dca_history_list"),
+)
 
 
 def _ms(value: Any) -> Optional[int]:
@@ -134,6 +153,113 @@ def collect(exchange: Any, begin_ms: int, inst_types: Iterable[str] = INST_TYPES
     return {"orders": orders, "errors": errors, "truncated": truncated, "counts": dict(counts)}
 
 
+def _bot_in_period(bot: dict, begin_ms: int) -> bool:
+    """Бот работал в периоде: остановлен (uTime) или создан (cTime) не раньше его начала."""
+    times = [t for t in (_ms(bot.get("uTime")), _ms(bot.get("cTime"))) if t is not None]
+    return not times or max(times) >= begin_ms
+
+
+def fetch_bot_history(exchange: Any, method: str, algo_ord_type: str,
+                      begin_ms: int) -> tuple[list[dict], bool]:
+    """Остановленные боты типа, работавшие в периоде. Возвращает (боты, truncated).
+
+    История идёт от новых к старым по cTime, но бот, созданный давно, мог быть
+    остановлен в периоде — поэтому листаем до конца (истории ботов короткие), а
+    фильтр по периоду — _bot_in_period.
+    """
+    fetch = getattr(exchange, method)
+    result: list[dict] = []
+    after: Optional[str] = None
+    for _ in range(MAX_PAGES):
+        params = {"algoOrdType": algo_ord_type, "limit": str(PAGE_LIMIT)}
+        if after:
+            params["after"] = after
+        page = fetch(params).get("data") or []
+        result.extend(b for b in page if _bot_in_period(b, begin_ms))
+        if len(page) < PAGE_LIMIT:
+            return result, False
+        after = page[-1]["algoId"]
+    return result, True
+
+
+def collect_bots(exchange: Any, begin_ms: int) -> dict:
+    """Боты grid/contract_grid/spot_dca/contract_dca: активные и история. Ошибка — в errors."""
+    bots: list[dict] = []
+    errors: list[dict] = []
+    truncated: list[str] = []
+    counts = Counter()
+    seen: set[str] = set()
+    for bot_type, fetch_active, history_method in BOT_SOURCES:
+        sources = (("bot_active", f"{bot_type} активные", lambda: (fetch_active(exchange, bot_type), False)),
+                   ("bot_history", f"{bot_type} история",
+                    lambda: fetch_bot_history(exchange, history_method, bot_type, begin_ms)))
+        for source, name, fetch in sources:
+            try:
+                items, cut = fetch()
+            except Exception as exc:  # в отчёт и в код выхода 2
+                log.error("боты %s: %s", name, _short(exc))
+                errors.append({"source": f"боты {name}", "error": _short(exc)})
+                continue
+            if cut:
+                truncated.append(f"боты {bot_type}")
+            for item in items:
+                key = str(item.get("algoId"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                bots.append(dict(item, algoOrdType=item.get("algoOrdType") or bot_type, _source=source))
+                counts[source] += 1
+    return {"bots": bots, "errors": errors, "truncated": truncated, "counts": dict(counts)}
+
+
+def _bot_row(bot: dict, att: order_owner.Attribution) -> dict:
+    row = {k: bot[k] for k in BOT_DETAIL_KEYS if bot.get(k) not in (None, "")}
+    row.update(source=bot.get("_source", ""), active=bot.get("_source") == "bot_active",
+               status=att.status, level=att.level, marker=att.marker, reason=att.reason)
+    if att.owner is not None:
+        row["owner"] = att.owner.code
+    if att.legacy:
+        row["legacy"] = True
+    return row
+
+
+def audit_bots(bots: list[dict], *, rule_since_ms: int = order_owner.RULE_SINCE_MS) -> dict:
+    """Боты по владельцам + warning/info (без сети). Бот без метки — warning и на demo."""
+    by_owner: dict[str, dict] = {}
+    warnings: list[dict] = []
+    info: list[dict] = []
+    for bot in bots:
+        att = order_owner.classify(bot, human_trades=False, rule_since_ms=rule_since_ms)
+        created = _ms(bot.get("cTime"))
+        if att.status == "unmarked" and created is not None and created < rule_since_ms:
+            att = order_owner.Attribution("unmarked", order_owner.LEVEL_INFO, None, "", "",
+                                          "бот без algoClOrdId и tag — до правила ORDER-OWNER-TAG", legacy=True)
+        elif att.status == "unmarked":
+            att = order_owner.Attribution(
+                "unmarked", order_owner.LEVEL_WARNING, None, "", "",
+                "бот без algoClOrdId и tag: ручной бот человека или чужая сессия — выяснить, чей")
+        row = _bot_row(bot, att)
+        if att.owner is not None:
+            group = by_owner.setdefault(att.owner.code, {"owner": att.owner.owner, "bots": 0, "active": 0,
+                                                         "stopped": 0, "types": Counter()})
+            group["bots"] += 1
+            group["active" if row["active"] else "stopped"] += 1
+            group["types"][row.get("algoOrdType", "?")] += 1
+            continue
+        (warnings if att.level == order_owner.LEVEL_WARNING else info).append(row)
+    for group in by_owner.values():
+        group["types"] = dict(group["types"])
+    active = [b for b in bots if b.get("_source") == "bot_active"]
+    return {
+        "by_owner": dict(sorted(by_owner.items(), key=lambda kv: -kv[1]["bots"])),
+        "warnings": warnings,
+        "info": info,
+        "summary": {"total": len(bots), "active": len(active), "stopped": len(bots) - len(active),
+                    "ok": sum(g["bots"] for g in by_owner.values()), "info": len(info),
+                    "warning": len(warnings)},
+    }
+
+
 def _row(order: dict, att: order_owner.Attribution) -> dict:
     row = {k: order[k] for k in DETAIL_KEYS if order.get(k) not in (None, "")}
     row.update(source=order.get("_source", ""), status=att.status, level=att.level,
@@ -190,8 +316,9 @@ def audit(orders: list[dict], *, human_trades: bool = True,
 
 
 def run_audit(exchange: Any, hours: float = DEFAULT_HOURS, *, mode: str = "demo",
-              now_ms: Optional[int] = None, inst_types: Iterable[str] = INST_TYPES) -> dict:
-    """Полный отчёт: сбор (только GET) + классификация."""
+              now_ms: Optional[int] = None, inst_types: Iterable[str] = INST_TYPES,
+              bots: bool = True) -> dict:
+    """Полный отчёт: сбор (только GET) + классификация ордеров и ботов."""
     hours = max(0.0, min(float(hours), float(ARCHIVE_HOURS)))
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     begin_ms = now_ms - int(hours * 3600 * 1000)
@@ -207,13 +334,19 @@ def run_audit(exchange: Any, hours: float = DEFAULT_HOURS, *, mode: str = "demo"
         truncated=data["truncated"],
         rule_since=order_owner.RULE_SINCE.isoformat(),
     )
+    if bots:
+        bot_data = collect_bots(exchange, begin_ms)
+        report["bots"] = audit_bots(bot_data["bots"])
+        report["bots"].update(read=bot_data["counts"], errors=bot_data["errors"],
+                              truncated=bot_data["truncated"])
     return report
 
 
 def exit_code(report: dict) -> int:
-    if report.get("errors"):
+    bots = report.get("bots") or {}
+    if report.get("errors") or bots.get("errors"):
         return 2
-    return 1 if report["summary"]["warning"] else 0
+    return 1 if report["summary"]["warning"] or (bots.get("summary") or {}).get("warning") else 0
 
 
 def _fmt_ms(ms: Optional[int]) -> str:
@@ -271,13 +404,53 @@ def render_text(report: dict, verbose: bool = False) -> str:
     _section("WARNING — ордер без метки владельца", report["warnings"], verbose, lines)
     for err in report["errors"]:
         lines.append(f"ОШИБКА чтения {err['source']}: {err['error']}")
+    if report.get("bots") is not None:
+        _render_bots(report["bots"], verbose, lines)
     s = report["summary"]
-    lines.append(f"Итог: всего {s['total']}, свои {s['ok']}, info {s['info']}, warning {s['warning']} "
-                 f"→ exit {exit_code(report)}")
+    b = (report.get("bots") or {}).get("summary")
+    lines.append(f"Итог: всего {s['total']}, свои {s['ok']}, info {s['info']}, warning {s['warning']}"
+                 + (f"; боты {b['total']} (активных {b['active']}), warning {b['warning']}" if b else "")
+                 + f" → exit {exit_code(report)}")
     return "\n".join(lines)
 
 
+def _fmt_bot(row: dict) -> str:
+    stop = f", стоп {_fmt_ms(_ms(row.get('uTime')))}" if not row.get("active") else ""
+    marks = " ".join(f"{k}={row[k]}" for k in ("algoClOrdId", "tag") if row.get(k))
+    return (f"{_fmt_ms(_ms(row.get('cTime')))} {row.get('algoOrdType', '?')} {row.get('instId', '?')} "
+            f"{row.get('state', '?')}{stop} algo {row.get('algoId')} {marks}".rstrip())
+
+
+def _render_bots(bots: dict, verbose: bool, lines: list[str]) -> None:
+    read = bots.get("read", {})
+    lines.append(f"Боты: активных {read.get('bot_active', 0)}, остановленных в периоде "
+                 f"{read.get('bot_history', 0)}; ошибок чтения {len(bots.get('errors', []))}"
+                 + (f"; обрезано: {', '.join(bots['truncated'])}" if bots.get("truncated") else ""))
+    for code, group in bots["by_owner"].items():
+        types = ", ".join(f"{k} {v}" for k, v in sorted(group["types"].items()))
+        lines.append(f"  {code:<8} {group['bots']:>5}  {group['owner']} — {types}; "
+                     f"активных {group['active']}, остановлено {group['stopped']}")
+    for title, rows in (("WARNING — бот без метки владельца", bots["warnings"]),
+                        ("INFO — бот без метки до правила / legacy", bots["info"])):
+        for label, subset in (("активные", [r for r in rows if r["active"]]),
+                              ("остановленные", [r for r in rows if not r["active"]])):
+            if not subset and label == "активные":
+                continue
+            lines.append(f"{title}, {label} ({len(subset)})" + (":" if subset else ": нет"))
+            shown = subset if verbose else subset[:LIST_LIMIT]
+            for row in shown:
+                lines.append(f"  {_fmt_bot(row)}")
+                lines.append(f"      {row['reason']}")
+            if len(subset) > len(shown):
+                lines.append(f"  … ещё {len(subset) - len(shown)} (--verbose)")
+    for err in bots.get("errors", []):
+        lines.append(f"ОШИБКА чтения {err['source']}: {err['error']}")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):   # → и … в консоли Windows с cp1251
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(prog="python -m src.order_audit", description=__doc__.splitlines()[0])
     parser.add_argument("--hours", type=float, default=DEFAULT_HOURS,
@@ -286,13 +459,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="счёт: demo (по умолчанию) или live-суб-аккаунт кармана")
     parser.add_argument("--json", action="store_true", help="отчёт JSON")
     parser.add_argument("--verbose", action="store_true", help="все строки info/legacy/warning")
+    parser.add_argument("--no-bots", action="store_true", help="без аудита нативных grid/DCA-ботов")
     args = parser.parse_args(argv)
     try:
         exchange = create_exchange(load_settings(args.mode))
     except Exception as exc:
         print(f"Не удалось создать клиент {args.mode}: {_short(exc)}", file=sys.stderr)
         return 2
-    report = run_audit(exchange, args.hours, mode=args.mode)
+    report = run_audit(exchange, args.hours, mode=args.mode, bots=not args.no_bots)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

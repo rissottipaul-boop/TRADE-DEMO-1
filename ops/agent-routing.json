@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-09-30",
+  "legacy_order": ["claude", "gemini", "muse", "codex"],
+  "runtimes": {
+    "claude": {"command": "claude", "default_model": "opus", "guard_status": "configured-not-e2e-verified"},
+    "codex": {"command": "codex", "default_model": "gpt-6-astra", "guard_status": "adapter-required", "sandbox": "read-only"},
+    "gemini": {"command": "gemini", "default_model": "pro", "guard_status": "event-schema-mismatch"},
+    "muse": {"command": "muse", "default_model": "muse-spark-1.3", "guard_status": "wsl-and-trust-unverified"}
+  },
+  "roles": {
+    "project-orchestrator": {
+      "file": ".github/agents/project-orchestrator.agent.md",
+      "priority": ["claude", "codex", "gemini", "muse"],
+      "models": {"claude": "opus", "codex": "gpt-6-astra", "gemini": "pro", "muse": "muse-spark-1.3"}
+    },
+    "insight-executor": {
+      "file": ".github/agents/insight-executor.agent.md",
+      "priority": ["codex", "claude", "gemini", "muse"],
+      "models": {"codex": "gpt-6-astra", "claude": "opus", "gemini": "pro", "muse": "muse-spark-1.3"}
+    },
+    "crypto-insight-hunter": {
+      "file": ".github/agents/crypto-insight-hunter.agent.md",
+      "priority": ["gemini", "claude", "codex", "muse"],
+      "models": {"gemini": "pro", "claude": "opus", "codex": "gpt-6-astra", "muse": "muse-spark-1.3"}
+    },
+    "okx-trader": {
+      "file": ".github/agents/okx-trader.agent.md",
+      "priority": ["claude", "codex", "gemini", "muse"],
+      "models": {"claude": "opus", "codex": "gpt-6-astra", "gemini": "pro", "muse": "muse-spark-1.3"}
+    },
+    "pump-risk-taker": {
+      "file": ".github/agents/pump-risk-taker.agent.md",
+      "priority": ["claude", "codex", "gemini", "muse"],
+      "models": {"claude": "opus", "codex": "gpt-6-astra", "gemini": "pro", "muse": "muse-spark-1.3"}
+    },
+    "ops-sentinel": {
+      "file": ".github/agents/ops-sentinel.agent.md",
+      "priority": ["claude", "codex", "muse", "gemini"],
+      "models": {"claude": "sonnet", "codex": "gpt-6-sol", "muse": "muse-spark-1.3", "gemini": "pro"}
+    }
+  }
+}

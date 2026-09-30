@@ -1,13 +1,27 @@
 // Последние записи ops/incidents.md (новые — сверху) — только чтение.
-// Вызов: await dv.view("notes/views/incidents", { limit: 3, chars: 260 })
+// ID задач вида ABC-123 ссылаются на доску. Вызов: await dv.view("notes/views/incidents", { limit: 3, chars: 260 })
 
 const INCIDENTS = "ops/incidents.md";
+const BOARD = "ops/board.md";
 const opts = Object.assign({ limit: 3, chars: 260 }, input || {});
 
+// ID задач доски (ENGINE-WATCHDOG, P1-72H, …) → ссылки на доску; уже оформленные ссылки не трогаем.
+function linkTasks(text) {
+  const holes = [];
+  const masked = String(text || "").replace(/\[([^\]]*)\]\([^)]*\)/g, (m) => {
+    holes.push(m);
+    return `\u0000${holes.length - 1}\u0000`;
+  });
+  const linked = masked.replace(/\b[A-Z]{2,}[A-Z0-9]*-[A-Z0-9]+(?:-[A-Z0-9]+)*\b/g, (id) => `[${id}](${BOARD})`);
+  return linked.replace(/\u0000(\d+)\u0000/g, (_, i) => holes[Number(i)]);
+}
+
 function short(text, limit) {
-  let s = (text || "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\*\*/g, "").replace(/<br\s*\/?>/gi, " ").trim();
+  let s = linkTasks(text).replace(/\*\*/g, "").replace(/<br\s*\/?>/gi, " ").trim();
   if (s.length <= limit) return s;
   s = s.slice(0, limit).replace(/\s+\S*$/, "");
+  const openBr = (s.match(/\[/g) || []).length - (s.match(/\]/g) || []).length;
+  if (openBr > 0) s = s.replace(/\[[^\]]*$/, "").replace(/\([^)]*$/, ""); // не резать ссылку пополам
   if ((s.match(/`/g) || []).length % 2) s += "`";
   return s + " …";
 }

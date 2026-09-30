@@ -357,8 +357,9 @@ class OkxApiError(RuntimeError):
 
 
 class OkxPublicClient:
-    """Минимальный клиент публичных эндпоинтов (stdlib, без ключей и без demo-заголовка:
-    рыночные данные demo = live-книга, demo-slippage.md §5)."""
+    """Минимальный клиент публичных эндпоинтов (stdlib, без ключей и без demo-заголовка).
+    Demo-лента — отдельный симулированный рынок: свой объём, сделки, стакан и список пар
+    (insights/pump-feed.md); история и бэктест — только live."""
 
     def __init__(self, base_url: str = OKX_REST, min_interval: float = MIN_REQUEST_INTERVAL,
                  timeout: float = 15.0, max_retries: int = 4,

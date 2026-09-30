@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "project-guard",
+            "command": ".venv\\Scripts\\python.exe ops\\hooks\\guard_adapter.py --client gemini",
+            "timeout": 20000
+          }
+        ]
+      }
+    ]
+  }
+}

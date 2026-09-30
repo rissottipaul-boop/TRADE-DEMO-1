@@ -18,10 +18,13 @@
     "manual": {"title": "Прочее / ручное", "plan": false, "note": "ордера человека без меток и всё неопознанное — не выбрасывается"}
   },
   "bots": {
-    "3949248990629228544": {"sleeve": "native_grid", "note": "BTC-USDT spot grid, эталон GRID-VERDICT (insights/grid-bot-demo-run.md)"}
+    "3949248990629228544": {"sleeve": "native_grid", "note": "BTC-USDT spot grid, эталон GRID-VERDICT (insights/grid-bot-demo-run.md)"},
+    "3952956346571608064": {"sleeve": "native_grid", "note": "LTC-USDT spot grid 20 USDT, внешняя сессия 25.09 09:14 (incidents.md 2026-09-30 02:40, AUDIT-BOTS; SLEEVES-BOT-RULE)"},
+    "3953013609424408576": {"sleeve": "native_grid", "note": "BTC-USDT spot grid 500 USDT, внешняя сессия 25.09 09:43 (incidents.md 2026-09-30 02:40, AUDIT-BOTS; SLEEVES-BOT-RULE)"}
   },
   "bot_algo_cl_ord_id_prefixes": {
     "flt": "demo_fleet",
+    "trd": "demo_fleet",
     "tst": "tests"
   },
   "cl_ord_id_prefixes": {

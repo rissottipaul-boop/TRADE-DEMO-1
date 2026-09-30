@@ -1,5 +1,5 @@
 ---
-name: StochRSI-MDI 趋势追踪 V1.1
+name: stochrsi-mdi-trend-v1
 description: 一个基于 StochRSI 与 MDI 指标差异扩大的高频趋势追踪策略，每15分钟执行一次，并包含严格的模拟仓测试和风控规则。
 ---
 

@@ -66,6 +66,11 @@
       "ctime": 1790286162993,
       "query": "path:insights \"Открытые вопросы\"",
       "title": "Инсайты с открытыми вопросами"
+    },
+    {
+      "type": "search",
+      "ctime": 1790286642097,
+      "query": "tag:#excalidraw"
     }
   ]
 }

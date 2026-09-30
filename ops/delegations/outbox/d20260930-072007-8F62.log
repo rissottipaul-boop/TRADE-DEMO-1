@@ -1,0 +1,25 @@
+[stdout]
+Сделано: написан `tests/test_agent_context.py` — 10 unittest-тестов по всем 8 пунктам заявки (синтетические доски строкой в тесте, заголовок ровно по ТЗ, `now` передаётся явно, временные файлы только через `tempfile`, без сети и pytest-фикстур). Модуль `src/agent_context.py` и `ops/hooks/` только читались, не правились.
+
+Изменённые файлы:
+- [tests/test_agent_context.py](/mnt/c/TG/BOT/TRADE DEMO 1/tests/test_agent_context.py) — новый (единственный файл сессии; `src/agent_context.py` в статусе `??` — чужая незакоммиченная работа, я его не трогал)
+
+Команды проверок и результат:
+- `.venv/Scripts/python.exe -m unittest tests.test_agent_context -v` — не выполнилась в этой среде (Windows-`.exe` не стартует под WSL: `UtilBindVsockAnyPort: socket failed`)
+- `python3 -m unittest tests.test_agent_context -v` — Ran 10 tests, OK, все зелёные (test_1, test_2, test_2b, test_3, test_4, test_5, test_6 с 5 subTest, test_7, test_8, test_8b)
+- `git status` по `tests/test_agent_context.py`, `src/agent_context.py`, `ops/hooks/autopilot.py` — только новый файл теста, правок модуля/хуков нет
+
+Число тестов: 10. Итог прогона: OK.
+
+Найденные баги модуля: нет (все тесты прошли напрямую, пометок `@unittest.expectedFailure` не потребовалось).
+
+
+[stderr]
+muse: workspace root: /mnt/c/TG/BOT/TRADE DEMO 1 (cwd default)
+muse: warning: rules file at /mnt/c/TG/BOT/TRADE DEMO 1/AGENTS.md exists, but the workspace is untrusted, so it is skipped for this session; restart with --trust-workspace to load project rules
+muse: Skills: 23 loaded · 1 warning
+muse:   .agents: project-skills-untrusted: project skills skipped because workspace is untrusted
+muse:   Run `muse skills list --source all` for full diagnostics.
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+
+

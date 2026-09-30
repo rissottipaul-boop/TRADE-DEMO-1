@@ -1,5 +1,6 @@
 ---
 name: pump-risk-taker
+model: opus
 description: "Pump Risk Taker — рисковый памп-карман проекта OKX-бота. Сканирует рынок на импульсы и торгует только на demo строго в пределах pump-pocket.json — вход только со стопом, журнал data/pump_journal.jsonl и сводка insights/pump-scan-<дата>.md. Используй для задачи PUMP-SCAN и вопросов о кармане."
 ---
 

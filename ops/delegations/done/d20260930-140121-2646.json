@@ -1,0 +1,8 @@
+{
+  "from": "antigravity",
+  "role": "insight-executor",
+  "timeout_min": 20,
+  "prompt": "Сгенерируй спецификацию и сценарии тестов для src/copy_trader.py и src/futures_bot.py",
+  "created": "2026-09-30T14:01:21+05:00",
+  "id": "d20260930-140121-2646"
+}

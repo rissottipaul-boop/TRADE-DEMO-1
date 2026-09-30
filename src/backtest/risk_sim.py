@@ -121,6 +121,18 @@ class SimRisk:
         self.events.extend((self.now, e) for e in events)
         return events
 
+    def block_instrument(self, hours: float = 4.0) -> None:
+        """Блокировка инструмента (hard stop сетки): запись в risk_instruments и логирование события."""
+        blocked_until = self.now + hours * 3600.0
+        with self.core._conn() as conn:
+            conn.execute(
+                "INSERT INTO risk_instruments (inst_id, loss_streak, blocked_until) VALUES (?, 0, ?) "
+                "ON CONFLICT(inst_id) DO UPDATE SET blocked_until=excluded.blocked_until",
+                (self.inst_id, blocked_until),
+            )
+        self.events.append((self.now, "instrument_blocked"))
+
+
     def update_equity(self, equity: float) -> list[str]:
         """Как движок в бою (engine.py -> risk.update_equity(totalEq)).
 

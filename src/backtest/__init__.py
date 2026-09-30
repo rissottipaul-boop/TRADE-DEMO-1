@@ -18,6 +18,8 @@
 """
 from src.backtest.data import Bar, InstrumentSpec, MarketDataStore, load_dataset
 from src.backtest.engine import Backtest, BacktestResult, CostModel, Strategy, run_backtest
+from src.backtest.grid import GridConfig, GridStrategy
 
 __all__ = ["Bar", "InstrumentSpec", "MarketDataStore", "load_dataset", "Backtest",
-           "BacktestResult", "CostModel", "Strategy", "run_backtest"]
+           "BacktestResult", "CostModel", "Strategy", "run_backtest",
+           "GridConfig", "GridStrategy"]

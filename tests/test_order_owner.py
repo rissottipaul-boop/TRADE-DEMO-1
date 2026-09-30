@@ -34,6 +34,14 @@ class RegistryTest(unittest.TestCase):
         self.assertTrue(any("'bota'" in p and "hex" in p for p in problems), problems)
         self.assertTrue(any("'lt'" in p and "дважды" in p for p in problems), problems)
 
+    def test_validator_allows_tail_with_non_hex(self):
+        # Хвост после родителя с не-hex буквой коллидировать не может: clOrdId
+        # родителя — код + uuid hex (botcar живёт этим правилом: хвост car).
+        good = (Owner("bot", "x", "x", "engine"), Owner("botcar", "x", "x", "strategy"))
+        self.assertEqual(order_owner.validate_registry(good), [])
+        bad = (Owner("bot", "x", "x", "engine"), Owner("bota", "x", "x", "strategy"))
+        self.assertTrue(any("hex" in p for p in order_owner.validate_registry(bad)))
+
     def test_validator_kind_rules(self):
         bad = (Owner("strx", "x", "x", "strategy"),   # код проекта не под корнем bot
                Owner("botx", "x", "x", "agent"),      # агент под корнем bot

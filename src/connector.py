@@ -416,7 +416,7 @@ def stop_grid_bots(
     """Останавливает нативные grid-боты OKX (grid и contract_grid) — для kill-switch.
 
     stop_type "2" (по умолчанию) — остановить, оставив базу (spot grid) или
-    позицию (contract grid) — без flatten, KILL-FLATTEN-DEFAULT; "1" — продать
+    позицию (contract grid) — без flatten, KILL-FLATTEN-DEFAULT (внимание: остановленный бот снимает и свой SL — контракт остается без стопа до KILL-CONTRACT-STOPTYPE); "1" — продать
     базу / закрыть позицию по рынку. POST tradingBot/grid/stop-order-algo —
     пачка до 10 ботов; частичный успех — code 2 и sCode по каждому боту.
 
@@ -454,7 +454,7 @@ def stop_dca_bots(
     позицию (contract_dca); "1" — продать монеты / закрыть позицию по рынку.
     Дефолт "2" — тот же, что у stop_grid_bots, и соответствует решению
     KILL-FLATTEN-DEFAULT (kill-switch без flatten; рыночное закрытие — отдельное
-    явное решение оператора). Внимание: остановленный бот снимает и свой SL.
+    явное решение оператора). Внимание: остановленный бот снимает и свой SL — контракт остается без стопа до KILL-CONTRACT-STOPTYPE.
 
     algo_ids — остановить только перечисленные algoId (точечная остановка,
     проверка на demo); None — все активные боты обоих типов.
@@ -489,6 +489,7 @@ def stop_dca_bots(
 def emergency_stop(exchange, include_bots: bool = True,
                    sleep: Callable[[float], None] = time.sleep) -> dict:
     """Всё для kill-switch: отмена ордеров (включая algo) + остановка grid- и DCA-ботов.
+    Signal-боты (contract) пока не останавливаются — слепая зона, см. insights/futures-bots.md §1.1.
 
     Каждый шаг изолирован: исключение в отмене ордеров или в остановке одного
     семейства ботов попадает в failed/errors и не мешает остальным шагам —

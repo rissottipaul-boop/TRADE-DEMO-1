@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".venv/Scripts/python.exe ops/hooks/guard_adapter.py --client codex",
+            "commandWindows": ".venv\\Scripts\\python.exe ops\\hooks\\guard_adapter.py --client codex",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
