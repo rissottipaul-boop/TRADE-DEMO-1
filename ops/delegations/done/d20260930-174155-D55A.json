@@ -1,0 +1,8 @@
+﻿{
+    "id":  "d20260930-174155-D55A",
+    "prompt":  "Выведи в stdout одну строку: SMOKE-OK. Ничего не меняй.",
+    "from":  "human",
+    "timeout_min":  20,
+    "created":  "2026-09-30T17:41:55+05:00",
+    "role":  "ops-sentinel"
+}

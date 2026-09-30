@@ -17,7 +17,6 @@ import re
 import secrets
 import shutil
 import subprocess
-import sys
 import threading
 from urllib.parse import parse_qs, urlsplit
 
@@ -35,7 +34,7 @@ MAX_JSON = 256 * 1024
 MAX_LOG_BYTES = 16 * 1024
 ALLOWED_ACTIONS = {"engine.start", "engine.stop", "delegation.pause", "delegation.stop"}
 RUNTIMES_CAPABILITIES = {
-    "codex": ["start", "status", "cancel"],
+    "codex": ["start", "status"],
     "claude": ["start", "status"],
     "gemini": ["start", "status"],
     "muse": ["start", "status", "events"],
@@ -43,7 +42,45 @@ RUNTIMES_CAPABILITIES = {
 
 
 def runtime_capabilities(root: Path = ROOT) -> dict[str, list[str]]:
-    return {k: list(v) for k, v in RUNTIMES_CAPABILITIES.items()}
+    return {name: [cap for cap in caps if cap != "start" or _guard_launch_ready(root, name)]
+            for name, caps in RUNTIMES_CAPABILITIES.items()}
+
+
+def _guard_launch_ready(root: Path, agent: str) -> bool:
+    """Требует подтверждение E2E из защищённого каталога, а не только реестр."""
+    registry = _read_json(root / "ops" / "agent-routing.json", {})
+    runtimes = registry.get("runtimes", {}) if isinstance(registry, dict) else {}
+    runtime = runtimes.get(agent, {}) if isinstance(runtimes, dict) else {}
+    if not isinstance(runtime, dict) or runtime.get("guard_status") != "e2e-verified":
+        return False
+    evidence = _read_json(root / "ops" / "hooks" / "launch-e2e.json", {})
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        return False
+    clients = evidence.get("clients", {})
+    entry = clients.get(agent, {}) if isinstance(clients, dict) else {}
+    return isinstance(entry, dict) and entry.get("verified") is True
+
+
+def _guard_observation(root: Path) -> dict:
+    """Только счётчики из хвоста журнала; сами команды и причины не выдаются."""
+    clients = {name: {"launch_ready": _guard_launch_ready(root, name),
+                      "denies_in_tail": 0, "last_deny_at": None}
+               for name in RUNTIMES_CAPABILITIES}
+    for line in _tail(root / "data" / "guard.log", limit=64 * 1024, lines=10000):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("decision") != "deny":
+            continue
+        client = event.get("client")
+        if not isinstance(client, str) or client not in clients:
+            continue
+        clients[client]["denies_in_tail"] += 1
+        ts = event.get("ts")
+        if isinstance(ts, str) and re.fullmatch(r"[0-9TZ:+.\- ]{1,40}", ts):
+            clients[client]["last_deny_at"] = ts
+    return {"clients": clients, "scope": "last_65536_bytes", "provenance": "data/guard.log"}
 
 
 def _read_json(path: Path, default=None):
@@ -194,7 +231,10 @@ def _agent_plan(root: Path, task_id: str, role: str, agent: str) -> dict:
     selected = plan.get("selected")
     eligible = task["eligible"]
     selected_candidate = next((c for c in candidates if c.get("agent") == selected), None)
-    guard_ok = bool(selected_candidate and selected_candidate.get("guard_status") not in ("unverified", "wsl-and-trust-unverified"))
+    guard_ok = bool(selected and selected_candidate and selected_candidate.get("available")
+                    and not selected_candidate.get("skipped")
+                    and not selected_candidate.get("wrapper_unverified")
+                    and _guard_launch_ready(root, selected))
     launch_enabled = bool(selected and eligible and guard_ok)
     reason = (
         f"Готов к запуску через {selected}" if launch_enabled else
@@ -355,7 +395,12 @@ def _redact_data(item):
 def _save_run(root: Path, run: dict) -> None:
     path = _runs_dir(root) / f"{run['id']}.json"
     clean = _redact_data(run)
-    path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = path.with_name(path.name + "." + secrets.token_hex(4) + ".tmp")
+    try:
+        temporary.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
@@ -376,20 +421,20 @@ def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
             alive = False
         if not alive:
             now = datetime.now(timezone.utc).isoformat()
-            run["status"] = "failed"
+            run["status"] = "unknown"
             run["finished_at"] = now
             events = run.setdefault("events", [])
             events.append({
                 "cursor": len(events) + 1,
                 "ts": now,
-                "type": "run.failed",
-                "data": {"reason": "Процесс завершился без подтверждения (recovery)"},
+                "type": "run.unconfirmed",
+                "data": {"reason": "Процесс не найден; итог исполнения требуется сверить"},
             })
             _save_run(root, run)
     return run
 
 
-def _list_runs(root: Path, limit: int = 50) -> list[dict]:
+def _list_runs(root: Path, limit: int | None = 50) -> list[dict]:
     runs_dir = _runs_dir(root)
     results = []
     for path in runs_dir.glob("run_*.json"):
@@ -397,7 +442,7 @@ def _list_runs(root: Path, limit: int = 50) -> list[dict]:
         if run:
             results.append(run)
     results.sort(key=lambda r: r.get("started_at") or "", reverse=True)
-    return results[:limit]
+    return results[:limit] if limit is not None else results
 
 
 def _spawn_agent_process(root: Path, agent: str, role: str, task_id: str, model: str | None = None) -> int:
@@ -412,20 +457,11 @@ def _spawn_agent_process(root: Path, agent: str, role: str, task_id: str, model:
     return proc.pid
 
 
-def _kill_process(pid: int) -> bool:
-    try:
-        if sys.platform == "win32":
-            res = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
-            return res.returncode == 0
-        else:
-            os.kill(pid, 9)
-            return True
-    except Exception:
-        return False
-
-
 def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
                idempotency_key: str | None = None, model: str | None = None) -> dict:
+    if idempotency_key is not None and (not isinstance(idempotency_key, str) or
+            not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", idempotency_key)):
+        raise ValueError("Неверный idempotency_key")
     task = _task_detail(root, task_id)
     if not task.get("eligible"):
         raise ValueError(f"Задача {task_id} не готова к запуску")
@@ -446,19 +482,25 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
         raise ValueError(f"Рантайм {agent} не поддерживает операцию start")
 
     # 1. Проверка по idempotency_key
+    all_runs = _list_runs(root, limit=None)
     if idempotency_key:
-        for existing in _list_runs(root):
+        for existing in all_runs:
             if existing.get("idempotency_key") == idempotency_key:
+                if (existing.get("task_id"), existing.get("role"), existing.get("runtime")) != (task_id, role, agent):
+                    raise ValueError("idempotency_key уже использован для другого запуска")
                 return existing
 
     # 2. Проверка активного запуска по task_id
-    for existing in _list_runs(root):
+    for existing in all_runs:
         if existing.get("task_id") == task_id and existing.get("status") == "running":
-            pid = existing.get("pid")
-            if pid and process_alive(pid):
-                return existing
+            return existing
+        if existing.get("task_id") == task_id and existing.get("status") == "unknown":
+            raise ValueError("Итог прежнего запуска неизвестен; нужна сверка перед повтором")
 
     # 3. Запуск нового процесса
+    plan = _agent_plan(root, task_id, role, agent)
+    if not plan.get("launch_enabled") or plan.get("selected") != agent:
+        raise ValueError("Запуск недоступен: " + str(plan.get("reason") or "guard/CLI не проверены"))
     pid = _spawn_agent_process(root, agent, role, task_id, model=model)
     now = datetime.now(timezone.utc).isoformat()
     rand_suffix = secrets.token_hex(4)
@@ -495,40 +537,9 @@ def _cancel_run(root: Path, run_id: str) -> dict:
     if not run:
         raise ValueError(f"Запуск {run_id} не найден")
 
-    runtime = run.get("runtime", "")
-    caps = RUNTIMES_CAPABILITIES.get(runtime, [])
-    if "cancel" not in caps:
-        return {
-            "ok": False,
-            "error": "unsupported",
-            "detail": f"Рантайм {runtime} не поддерживает отмену (cancel)",
-            "run": run,
-        }
-
-    if run.get("status") != "running":
-        return {
-            "ok": False,
-            "error": f"Запуск уже завершён со статусом {run.get('status')}",
-            "status": run.get("status"),
-            "run": run,
-        }
-
-    pid = run.get("pid")
-    if pid:
-        _kill_process(pid)
-
-    now = datetime.now(timezone.utc).isoformat()
-    run["status"] = "cancelled"
-    run["finished_at"] = now
-    events = run.setdefault("events", [])
-    events.append({
-        "cursor": len(events) + 1,
-        "ts": now,
-        "type": "run.cancelled",
-        "data": {"reason": "Отменено пользователем из пульта Контур"},
-    })
-    _save_run(root, run)
-    return {"ok": True, "status": "cancelled", "run": run}
+    return {"ok": False, "error": "unsupported",
+            "detail": "Отмена ждёт идентификатор сессии и подтверждение клиента; PID не завершался",
+            "run": run}
 
 
 def state(root: Path = ROOT) -> dict:
@@ -551,6 +562,7 @@ def state(root: Path = ROOT) -> dict:
             "runtimes": registry.get("runtimes", {}) if isinstance(registry, dict) else {},
             "roles": registry.get("roles", {}) if isinstance(registry, dict) else {},
             "capabilities": runtime_capabilities(root),
+            "guard_observation": part("guard_observation", lambda: _guard_observation(root)),
             "runs": part("runs", lambda: _list_runs(root, 20)),
             "engine": part("engine", lambda: _engine(root)),
             "processes": part("processes", lambda: _processes(root)),

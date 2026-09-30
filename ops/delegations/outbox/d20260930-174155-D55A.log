@@ -1,0 +1,27 @@
+[stdout]
+SMOKE-OK
+
+[stderr]
+tbh: ignoring unknown top-level member in settings file at /home/ttt/.config/muse/settings.json: reason=unknown_member location=settings
+muse: workspace root: /mnt/c/TG/BOT/TRADE DEMO 1 (cwd default)
+muse: warning: rules file at /mnt/c/TG/BOT/TRADE DEMO 1/AGENTS.md exists, but the workspace is untrusted, so it is skipped for this session; restart with --trust-workspace to load project rules
+muse: Skills: 23 loaded · 1 warning
+muse:   .agents: project-skills-untrusted: project skills skipped because workspace is untrusted
+muse:   Run `muse skills list --source all` for full diagnostics.
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `parallel_workers` is malformed; capability is inactive: invalid type: integer `10`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: runtime capability `plugin:skill-reminder:reminder:skill-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:goal-reminder:reminder:goal-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:memory-reminder:reminder:memory-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:todo-reminder:reminder:todo-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:verify-reminder:reminder:verify-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:scope-reminder:reminder:scope-reminder` is inactive: reminder enablement settings are invalid
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+
+

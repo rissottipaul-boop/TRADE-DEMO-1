@@ -163,14 +163,44 @@ class RunManagerTests(unittest.TestCase):
 
     def test_runtime_capabilities_reports_matrix_for_four_clients(self):
         caps = panel.runtime_capabilities(self.root)
-        self.assertEqual(set(caps["codex"]), {"start", "status", "cancel"})
-        self.assertEqual(set(caps["claude"]), {"start", "status"})
-        self.assertEqual(set(caps["gemini"]), {"start", "status"})
-        self.assertEqual(set(caps["muse"]), {"start", "status", "events"})
+        self.assertEqual(set(caps["codex"]), {"status"})
+        self.assertEqual(set(caps["claude"]), {"status"})
+        self.assertEqual(set(caps["gemini"]), {"status"})
+        self.assertEqual(set(caps["muse"]), {"status", "events"})
+
+    def test_launch_requires_protected_e2e_evidence(self):
+        registry = json.loads((self.root / "ops" / "agent-routing.json").read_text(encoding="utf-8"))
+        registry["runtimes"]["codex"]["guard_status"] = "e2e-verified"
+        (self.root / "ops" / "agent-routing.json").write_text(json.dumps(registry), encoding="utf-8")
+        self.assertFalse(panel._guard_launch_ready(self.root, "codex"))
+        hooks = self.root / "ops" / "hooks"
+        hooks.mkdir()
+        (hooks / "launch-e2e.json").write_text(json.dumps({"schema_version": 1,
+            "clients": {"codex": {"verified": True}}}), encoding="utf-8")
+        self.assertTrue(panel._guard_launch_ready(self.root, "codex"))
+        self.assertIn("start", panel.runtime_capabilities(self.root)["codex"])
+
+    def test_guard_observation_only_exposes_client_counts(self):
+        log = self.root / "data" / "guard.log"
+        log.parent.mkdir()
+        log.write_text("\n".join([
+            json.dumps({"ts": "2026-09-30T12:00:00Z", "decision": "deny",
+                        "client": "codex", "snippet": "sensitive-canary"}),
+            json.dumps({"ts": "2026-09-30T12:01:00Z", "decision": "deny",
+                        "client": "muse", "reason": "private reason"}),
+            json.dumps({"decision": "deny", "client": {"bad": "shape"}}),
+        ]), encoding="utf-8")
+        view = panel._guard_observation(self.root)
+        self.assertEqual(view["clients"]["codex"]["denies_in_tail"], 1)
+        self.assertEqual(view["clients"]["muse"]["denies_in_tail"], 1)
+        self.assertFalse(view["clients"]["codex"]["launch_ready"])
+        self.assertNotIn("sensitive-canary", json.dumps(view))
+        self.assertNotIn("private reason", json.dumps(view))
 
     def test_runs_idempotent_start_and_single_active_run(self):
         alive_map = {1111: True}
-        with patch.object(panel, "_spawn_agent_process", return_value=1111) as spawn_mock, \
+        with patch.object(panel, "_agent_plan", return_value={"selected": "codex", "launch_enabled": True}), \
+             patch.object(panel, "_spawn_agent_process", return_value=1111) as spawn_mock, \
              patch.object(panel, "process_alive", side_effect=lambda pid: alive_map.get(pid, False)):
             run1 = panel._start_run(self.root, "T1", "insight-executor", "codex", idempotency_key="idemp-key-1")
             self.assertEqual(run1["status"], "running")
@@ -192,41 +222,43 @@ class RunManagerTests(unittest.TestCase):
             spawn_mock.return_value = 2222
             alive_map[2222] = True
 
-            # Next start recovers previous run and starts new one
-            run4 = panel._start_run(self.root, "T1", "insight-executor", "codex")
-            self.assertNotEqual(run4["id"], run1["id"])
-            self.assertEqual(run4["pid"], 2222)
-            self.assertEqual(spawn_mock.call_count, 2)
+            # Unknown outcome blocks replay until the operator reconciles it.
+            with self.assertRaisesRegex(ValueError, "Итог прежнего запуска неизвестен"):
+                panel._start_run(self.root, "T1", "insight-executor", "codex")
+            self.assertEqual(spawn_mock.call_count, 1)
 
             recovered = panel._get_run(self.root, run1["id"], check_alive=False)
-            self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(recovered["status"], "unknown")
 
-    def test_run_cancel_checks_capability_and_terminates_process(self):
-        with patch.object(panel, "_spawn_agent_process", side_effect=[3333, 4444]), \
-             patch.object(panel, "process_alive", return_value=True), \
-             patch.object(panel, "_kill_process", return_value=True) as kill_mock:
-            muse_run = panel._start_run(self.root, "T1", "insight-executor", "muse", idempotency_key="muse-1")
-            # Muse does not have 'cancel' capability
-            cancel_muse = panel._cancel_run(self.root, muse_run["id"])
-            self.assertFalse(cancel_muse["ok"])
-            self.assertEqual(cancel_muse["error"], "unsupported")
+    def test_run_cancel_never_kills_unverified_pid(self):
+        run = {"id": "run_T1_test", "runtime": "codex", "task_id": "T1",
+               "status": "running", "pid": 4444, "events": []}
+        panel._save_run(self.root, run)
+        with patch.object(panel, "process_alive", return_value=True), \
+             patch.object(panel.subprocess, "run") as process_call:
+            result = panel._cancel_run(self.root, run["id"])
+        self.assertEqual(result["error"], "unsupported")
+        self.assertEqual(panel._get_run(self.root, run["id"], check_alive=False)["status"], "running")
+        process_call.assert_not_called()
 
-            # Codex supports cancel
-            # Mark muse_run as failed so we can start codex
-            muse_file = panel._runs_dir(self.root) / f"{muse_run['id']}.json"
-            muse_run["status"] = "failed"
-            muse_file.write_text(json.dumps(muse_run))
+    def test_idempotency_key_cannot_return_another_task_run(self):
+        other = {"id": "run_T2_old", "task_id": "T2", "role": "insight-executor",
+                 "runtime": "codex", "status": "completed", "idempotency_key": "same-key",
+                 "started_at": "2020-01-01T00:00:00Z", "events": []}
+        panel._save_run(self.root, other)
+        with self.assertRaisesRegex(ValueError, "idempotency_key уже использован"):
+            panel._start_run(self.root, "T1", "insight-executor", "codex", idempotency_key="same-key")
 
-            codex_run = panel._start_run(self.root, "T1", "insight-executor", "codex", idempotency_key="codex-1")
-            cancel_codex = panel._cancel_run(self.root, codex_run["id"])
-            self.assertTrue(cancel_codex["ok"])
-            self.assertEqual(cancel_codex["status"], "cancelled")
-            kill_mock.assert_called_once_with(4444)
-
-            # Re-cancelling returns status cancelled
-            cancel_again = panel._cancel_run(self.root, codex_run["id"])
-            self.assertFalse(cancel_again["ok"])
-            self.assertIn("cancelled", cancel_again["error"])
+    def test_unknown_run_outside_display_limit_blocks_replay(self):
+        panel._save_run(self.root, {"id": "run_T1_old", "task_id": "T1",
+            "role": "insight-executor", "runtime": "codex", "status": "unknown",
+            "started_at": "2020-01-01T00:00:00Z", "events": []})
+        for index in range(51):
+            panel._save_run(self.root, {"id": f"run_T2_{index}", "task_id": "T2",
+                "status": "completed", "started_at": f"2025-01-01T00:{index:02}:00Z",
+                "events": []})
+        with self.assertRaisesRegex(ValueError, "Итог прежнего запуска неизвестен"):
+            panel._start_run(self.root, "T1", "insight-executor", "codex")
 
     def test_runs_redact_secrets_in_events_and_details(self):
         run = {
@@ -327,7 +359,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(code, 200)
         caps = json.loads(body)["capabilities"]
         self.assertIn("codex", caps)
-        self.assertIn("cancel", caps["codex"])
+        self.assertNotIn("cancel", caps["codex"])
+        self.assertNotIn("start", caps["codex"])
 
         # Runs listing
         code, body = self.request("GET", "/api/runs", headers=headers)
@@ -356,6 +389,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["ok"])
         cancel_mock.assert_called_once_with(self.root, "run_T1_http")
+
+    def test_direct_start_cannot_bypass_plan_guard(self):
+        (self.root / "ops").mkdir()
+        (self.root / "ops" / "board.md").write_text(BOARD, encoding="utf-8")
+        (self.root / "ops" / "agent-routing.json").write_text(json.dumps({
+            "runtimes": {"codex": {"guard_status": "adapter-required"}},
+            "roles": {"insight-executor": {}}}), encoding="utf-8")
+        headers = {"X-Control-Token": "test-secret", "Content-Type": "application/json"}
+        with patch.object(panel, "_agent_plan", return_value={"selected": "codex",
+                "launch_enabled": False, "reason": "guard не проверен"}), \
+             patch.object(panel, "_spawn_agent_process") as spawn:
+            code, body = self.request("POST", "/api/runs",
+                b'{"task_id":"T1","role":"insight-executor","agent":"codex"}', headers)
+        self.assertEqual(code, 400)
+        self.assertIn("guard", json.loads(body)["error"])
+        spawn.assert_not_called()
 
 
 if __name__ == "__main__":

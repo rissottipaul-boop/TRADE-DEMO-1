@@ -1,7 +1,7 @@
 ---
 task: DELEG-SMOKE
 date: 2026-09-30 07:45
-status: новое
+status: перенесено
 ---
 # Решение по DELEG-SMOKE
 
