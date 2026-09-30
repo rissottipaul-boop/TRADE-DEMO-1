@@ -1,7 +1,7 @@
 ---
 task: VPS-BUY
 date: 2026-09-30 05:21
-status: новое
+status: перенесено
 ---
 # Решение по VPS-BUY
 

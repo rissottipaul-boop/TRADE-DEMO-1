@@ -1,7 +1,7 @@
 ---
 task: PUMP-HANDOFF-WAKE
 date: 2026-09-30 10:31
-status: новое
+status: перенесено
 ---
 # Решение по PUMP-HANDOFF-WAKE
 

@@ -1,7 +1,7 @@
 ---
 task: COPYTRADE-UI-CHECK
 date: 2026-09-30 05:22
-status: новое
+status: перенесено
 ---
 # Решение по COPYTRADE-UI-CHECK
 

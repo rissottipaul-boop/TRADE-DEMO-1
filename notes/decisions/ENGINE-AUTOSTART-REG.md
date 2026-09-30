@@ -1,7 +1,7 @@
 ---
 task: ENGINE-AUTOSTART-REG
 date: 2026-09-30 04:54
-status: новое
+status: перенесено
 ---
 # Решение по ENGINE-AUTOSTART-REG
 

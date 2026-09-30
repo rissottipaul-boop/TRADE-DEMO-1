@@ -1,7 +1,7 @@
 ---
 task: ALERTS-TG
 date: 2026-09-30 05:21
-status: новое
+status: перенесено
 ---
 # Решение по ALERTS-TG
 
