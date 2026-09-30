@@ -69,9 +69,17 @@
       </section>
 
       <section id="runs" class="panel section-panel">
-        <div class="panel-head"><div><div class="eyebrow">AGENT RUNS · CONTROL PLANE</div><h2>Журнал запусков панели</h2></div><span id="runs-count" class="badge">0 RUNS</span></div>
+        <div class="panel-head"><div><div class="eyebrow">AGENT RUNS · CONTROL PLANE</div><h2>Активность агентов</h2></div><span id="runs-count" class="badge">—</span></div>
+        <h3 class="activity-heading">Назначенные задачи</h3>
+        <div id="claims-list" class="event-list"></div>
+        <p class="table-hint">Назначение на доске само по себе не подтверждает живой процесс.</p>
+        <h3 class="activity-heading">Запуски и заявки</h3>
         <div id="runs-list" class="event-list"></div>
-        <p class="table-hint">Запуск закрыт до проверки guard у конкретного клиента. Отмена и управление существующими сессиями пока недоступны; исчезнувший процесс требует сверки результата.</p>
+        <div id="run-detail" class="run-detail" hidden>
+          <div class="panel-head"><div><div class="eyebrow">СОБЫТИЯ ЛОКАЛЬНОГО ЗАПУСКА</div><h3 id="run-detail-title">—</h3></div><div class="process-buttons"><button id="run-detail-refresh" class="soft" type="button">Обновить</button><button id="run-detail-close" class="soft" type="button">Закрыть</button></div></div>
+          <div id="run-event-list" class="event-list" aria-live="polite"></div>
+        </div>
+        <p class="table-hint">Заявки Muse отражают стадию файла. Запуск через панель закрыт до проверки guard; отмена и управление существующими сессиями пока недоступны.</p>
       </section>
 
       <section class="columns workspace-section">

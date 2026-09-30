@@ -15,7 +15,8 @@
 | `src/account_mode.py` | Режим аккаунта (`acctLv`, autoLoan): tdMode спота и запрет скрытого займа — для роутера, движка, скриптов и live-preflight |
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/agent_context.py` | Адресное чтение доски для агентов (AGENT-TOKEN-ECONOMY): карточка задачи дословно, транзитивные зависимости, активные claims, дубликаты ID; разбор — `ops/hooks/autopilot.py`, без записи и сети |
-| `src/control_panel.py` + `ops/control-panel/` | Локальный веб-пульт «Контур»: доска, рантаймы, движок, риск, очередь Muse, журналы; allowlist ops-действий, localhost + токен, без Flowise — [инструкция](control-panel/README.md) |
+| `src/control_panel.py` + `ops/control-panel/` | Локальный веб-пульт «Контур»: доска, рантаймы, движок, риск, очередь Muse, единая активность и курсор локальных событий; allowlist ops-действий, localhost + токен, без Flowise — [инструкция](control-panel/README.md) |
+| `src/worktree_lease.py` | Резервирование задачи и изолированного Git worktree от чистого HEAD, heartbeat и инспекция регистрации; не запускает агента и не освобождает lease автоматически |
 | `src/guard_adapter.py` | Адаптер hook-вызовов Codex / Gemini CLI / Muse Code к `ops/hooks/guard.py` (AGENT-GUARD-COMPAT): `apply_patch` в `command`, `cmd`/argv, вложенные вызовы, `BeforeTool`, пути WSL, корень с пробелами; ответ в формате клиента, правил не содержит. Hooks пока не вызывают: патч `insights/guard-compat-patch.diff` переносит его в `ops/hooks/` (решение человека, [guard-compat.md](../insights/guard-compat.md)) |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
 | `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |

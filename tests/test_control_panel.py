@@ -67,6 +67,36 @@ class StateTests(unittest.TestCase):
         self.assertEqual(jobs[0]["cost_quality"], "unknown")
         self.assertNotIn("private", json.dumps(jobs))
 
+    def test_observed_runs_include_muse_with_file_stage_quality(self):
+        base = self.root / "ops" / "delegations"
+        (base / "processing").mkdir()
+        (base / "processing" / "d-stage.json").write_text(json.dumps({
+            "id": "d-stage", "role": "review", "prompt": "private prompt",
+            "created": "2026-09-30T12:00:00+05:00"}), encoding="utf-8")
+        observed = panel._observed_runs(self.root)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["id"], "d-stage")
+        self.assertEqual(observed[0]["status"], "processing-unverified")
+        self.assertEqual(observed[0]["state_quality"], "file-stage")
+        self.assertFalse(observed[0]["managed"])
+        self.assertIsNone(observed[0]["cost"]["usd"])
+        self.assertNotIn("private prompt", json.dumps(observed))
+
+    def test_observed_local_run_is_projection_without_internal_fields(self):
+        panel._save_run(self.root, {
+            "id": "run_T1_projection", "task_id": "T1", "role": "insight-executor",
+            "runtime": "codex", "status": "completed", "prompt": "private prompt",
+            "events": [{"cursor": 1, "type": "run.progress", "data": "private output"}],
+            "internal_note": "private note", "cost": {"usd": None, "quality": "unknown"},
+        })
+        observed = panel._observed_runs(self.root)
+        self.assertEqual(observed[0]["id"], "run_T1_projection")
+        self.assertEqual(observed[0]["source_kind"], "panel")
+        self.assertTrue(observed[0]["managed"])
+        self.assertNotIn("private", json.dumps(observed))
+        self.assertNotIn("events", observed[0])
+        self.assertNotIn("prompt", observed[0])
+
     def test_only_allowlisted_actions_and_pause_flag(self):
         with self.assertRaises(ValueError):
             panel.action(self.root, "engine.reset")
@@ -278,6 +308,21 @@ class RunManagerTests(unittest.TestCase):
         self.assertNotIn("supersecrettoken", event_str)
         self.assertIn("[СКРЫТО]", event_str)
 
+    def test_run_events_cursor_is_stable_across_pages(self):
+        run = {"id": "run_T1_events", "task_id": "T1", "status": "completed",
+               "events": [{"cursor": index, "type": "run.progress", "ts": f"time-{index}"}
+                          for index in (1, 2, 3)]}
+        panel._save_run(self.root, run)
+        first = panel._run_events(self.root, run["id"], after=1, limit=1)
+        self.assertEqual([e["cursor"] for e in first["events"]], [2])
+        self.assertEqual(first["next_cursor"], 2)
+        self.assertTrue(first["has_more"])
+        second = panel._run_events(self.root, run["id"], after=first["next_cursor"])
+        self.assertEqual([e["cursor"] for e in second["events"]], [3])
+        self.assertFalse(second["has_more"])
+        with self.assertRaisesRegex(ValueError, "Неверный курсор"):
+            panel._run_events(self.root, run["id"], after=-1)
+
 
 class HttpTests(unittest.TestCase):
     def setUp(self):
@@ -389,6 +434,43 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["ok"])
         cancel_mock.assert_called_once_with(self.root, "run_T1_http")
+
+    def test_runs_http_includes_muse_without_prompt_or_output(self):
+        outbox = self.root / "ops" / "delegations" / "outbox"
+        outbox.mkdir(parents=True)
+        (outbox / "d-safe.json").write_text(json.dumps({"id": "d-safe", "status": "done",
+            "role": "review", "created": "2026-09-30T12:00:00Z", "exit_code": 0,
+            "prompt": "private prompt", "output_tail": "private output"}), encoding="utf-8")
+        code, body = self.request("GET", "/api/runs", headers={"X-Control-Token": "test-secret"})
+        self.assertEqual(code, 200)
+        runs = json.loads(body)["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["id"], "d-safe")
+        self.assertFalse(runs[0]["managed"])
+        self.assertEqual(runs[0]["state_quality"], "file-stage")
+        self.assertNotIn("private", body)
+
+    def test_events_http_requires_token_and_valid_cursor(self):
+        panel._save_run(self.root, {"id": "run_T1_http_events", "status": "completed",
+            "events": [{"cursor": 1, "type": "run.started", "ts": "2026-09-30T12:00:00Z"}]})
+        self.assertEqual(self.request("GET", "/api/run/events?id=run_T1_http_events")[0], 403)
+        headers = {"X-Control-Token": "test-secret"}
+        code, body = self.request("GET", "/api/run/events?id=run_T1_http_events&after=0", headers=headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["next_cursor"], 1)
+        self.assertEqual(self.request("GET", "/api/run/events?id=run_T1_http_events&after=-1", headers=headers)[0], 400)
+        self.assertEqual(self.request("GET", "/api/run/events?id=d-muse", headers=headers)[0], 404)
+
+    def test_worktree_leases_http_is_read_only_and_authenticated(self):
+        self.assertEqual(self.request("GET", "/api/worktree-leases")[0], 403)
+        with patch.object(panel, "inspect_leases", return_value=[{
+            "task_id": "T1", "run_id": "run_T1_abc", "registered": False,
+            "owner_verified": False}]) as inspect:
+            code, body = self.request("GET", "/api/worktree-leases",
+                                      headers={"X-Control-Token": "test-secret"})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["leases"][0]["task_id"], "T1")
+        inspect.assert_called_once_with(self.root)
 
     def test_direct_start_cannot_bypass_plan_guard(self):
         (self.root / "ops").mkdir()

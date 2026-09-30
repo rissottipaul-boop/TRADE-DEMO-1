@@ -24,6 +24,7 @@ from src.agent_context import build_context, dependencies, new_decisions, read_r
 from src.engine_watchdog import Paths, decide, gather
 from src.netdata_monitor import check_netdata_health
 from src.obsidian_status import build_snapshot, process_alive
+from src.worktree_lease import inspect_leases
 from ops.hooks.autopilot import parse_board, ready_tasks
 
 
@@ -445,6 +446,48 @@ def _list_runs(root: Path, limit: int | None = 50) -> list[dict]:
     return results[:limit] if limit is not None else results
 
 
+def _observed_runs(root: Path, limit: int = 50) -> list[dict]:
+    """Общий список без превращения файловой стадии Muse в подтверждённый run."""
+    records = []
+    for run in _list_runs(root, limit=None):
+        # Список — краткая проекция. События и будущие поля локальной записи
+        # остаются в /api/run/events, а не попадают в общий снимок панели.
+        visible = {key: run.get(key) for key in (
+            "id", "task_id", "role", "runtime", "model", "status", "pid",
+            "started_at", "finished_at", "exit_code", "cost", "provenance")}
+        records.append({**visible, "source_kind": "panel", "managed": True,
+                        "state_quality": "pid-only" if run.get("status") == "running" else "local-record"})
+    for job in _queue(root)["jobs"]:
+        records.append({
+            "id": job["id"], "runtime": "muse", "role": job.get("role"),
+            "task_id": None, "status": job["state"], "pid": None,
+            "started_at": job.get("created"), "finished_at": job.get("finished"),
+            "elapsed_s": job.get("elapsed_s"), "exit_code": job.get("exit_code"),
+            "cost": {"usd": job.get("cost_usd"), "quality": job.get("cost_quality", "unknown")},
+            "provenance": job.get("provenance"), "source_kind": "muse-queue",
+            "managed": False, "state_quality": "file-stage",
+        })
+    records.sort(key=lambda item: (item.get("started_at") or "", item["id"]), reverse=True)
+    return records[:limit]
+
+
+def _run_events(root: Path, run_id: str, after: int = 0, limit: int = 100) -> dict:
+    if after < 0 or after > 1_000_000_000:
+        raise ValueError("Неверный курсор события")
+    run = _get_run(root, run_id, check_alive=True)
+    if not run:
+        raise ValueError("Локальный запуск не найден")
+    events = [event for event in run.get("events", [])
+              if isinstance(event, dict) and isinstance(event.get("cursor"), int)
+              and event["cursor"] > after]
+    events.sort(key=lambda event: event["cursor"])
+    page = events[:limit]
+    return {"run_id": run_id, "events": page,
+            "next_cursor": page[-1]["cursor"] if page else after,
+            "has_more": len(events) > limit,
+            "status": run.get("status"), "provenance": run.get("provenance")}
+
+
 def _spawn_agent_process(root: Path, agent: str, role: str, task_id: str, model: str | None = None) -> int:
     script = root / "ops" / "agent-rotate.ps1"
     if not script.is_file():
@@ -563,10 +606,11 @@ def state(root: Path = ROOT) -> dict:
             "roles": registry.get("roles", {}) if isinstance(registry, dict) else {},
             "capabilities": runtime_capabilities(root),
             "guard_observation": part("guard_observation", lambda: _guard_observation(root)),
-            "runs": part("runs", lambda: _list_runs(root, 20)),
+            "runs": part("runs", lambda: _observed_runs(root, 30)),
             "engine": part("engine", lambda: _engine(root)),
             "processes": part("processes", lambda: _processes(root)),
             "worktrees": part("worktrees", lambda: _worktrees(root)),
+            "worktree_leases": part("worktree_leases", lambda: inspect_leases(root)),
             "snapshot": snap, "delegation": part("delegation", lambda: _queue(root)),
             "netdata": part("netdata", lambda: check_netdata_health(timeout=1.0)),
             "rotation": part("rotation", lambda: _rotation(root)),
@@ -694,7 +738,19 @@ class PanelHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/capabilities":
             return self._json(200, {"capabilities": runtime_capabilities(self.server.root)})
         if parsed.path == "/api/runs":
-            return self._json(200, {"runs": _list_runs(self.server.root)})
+            return self._json(200, {"runs": _observed_runs(self.server.root)})
+        if parsed.path == "/api/worktree-leases":
+            return self._json(200, {"leases": inspect_leases(self.server.root)})
+        if parsed.path == "/api/run/events":
+            try:
+                query = parse_qs(parsed.query)
+                run_id = query.get("id", [""])[0]
+                cursor = query.get("after", ["0"])[0]
+                if not re.fullmatch(r"[0-9]{1,10}", cursor):
+                    raise ValueError("Неверный курсор события")
+                return self._json(200, _run_events(self.server.root, run_id, int(cursor)))
+            except ValueError as exc:
+                return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
         if parsed.path == "/api/run":
             try:
                 run_id = parse_qs(parsed.query).get("id", [""])[0]

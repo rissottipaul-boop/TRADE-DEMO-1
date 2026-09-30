@@ -6,6 +6,7 @@ let toastTimer = null;
 let selectedTask = null;
 let returnFocus = null;
 let handoffMarkdown = "";
+let selectedRunId = null;
 const labels = {claude:"Claude Code",codex:"Codex",gemini:"Gemini CLI",muse:"Muse Code"};
 function set(id, value){$(id).textContent = value == null ? "—" : String(value)}
 function node(tag, cls, text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=String(text);return n}
@@ -60,14 +61,100 @@ async function copyHandoff(){if(!handoffMarkdown)return;try{await navigator.clip
 async function planTask(){if(!selectedTask)return;const button=$("plan-button"),result=$("plan-result");button.disabled=true;$("launch-button").hidden=true;result.replaceChildren(node("div","subtle","Проверяем доступные CLI…"));try{const response=await fetch("/api/agent/plan",{method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify({task_id:selectedTask.id,role:$("plan-role").value,agent:$("plan-agent").value})});const plan=await response.json();if(!response.ok)throw Error(plan.error||"HTTP "+response.status);result.replaceChildren();result.append(node("div",plan.eligible?"plan-summary":"plan-warning",(plan.selected?"Выбран: "+(labels[plan.selected]||plan.selected):"Доступный CLI не найден")+" · "+plan.reason));$("launch-button").hidden=!plan.launch_enabled;for(const c of plan.candidates||[]){const line=node("div","candidate"),info=node("div"),label=labels[c.agent]||c.agent;info.append(node("strong","",label),node("small","",(c.model||"модель не задана")+" · guard: "+(c.guard_status||"не проверен")));line.append(info,node("span","",c.available&&!c.skipped?"CLI найден":"CLI недоступен"));result.append(line)}}catch(err){result.replaceChildren(node("div","plan-warning",err.message));toast(err.message,true)}finally{button.disabled=false}}
 function renderRuntimes(s){const box=$("runtime-grid");box.replaceChildren();for(const id of ["codex","claude","gemini","muse"]){const r=s.runtimes?.[id]||{},card=node("div","runtime");card.append(node("div","name",labels[id]),node("div","model",r.default_model||"модель не задана"),node("div","guard","Guard: "+(r.guard_status||"не проверен")),node("div","guard",(s.capabilities?.[id]||[]).includes("start")?"Запуск через панель доступен":"Запуск через панель закрыт"));const evidence=s.guard_observation?.clients?.[id];card.append(node("div","guard",evidence?("Отказы с ID клиента в хвосте журнала: "+evidence.denies_in_tail):"Данные guard недоступны"));box.append(card)}}
 function renderInventory(s){const processes=$("process-list");processes.replaceChildren();for(const p of s.processes||[]){const el=node("div","event"),left=node("div");left.append(node("strong","",p.name),node("small","","PID записан: "+p.pid+" · владелец не подтверждён"));el.append(left,node("time","",p.alive===true?"процесс жив":p.alive===false?"не найден":"статус неизвестен"));processes.append(el)}if(!processes.children.length)empty(processes,"PID-файлов нет");
-  const worktrees=$("worktree-list");worktrees.replaceChildren();for(const w of s.worktrees||[]){const el=node("div","event"),left=node("div");left.append(node("strong","",(w.branch||"detached").replace("refs/heads/","")),node("small","",w.worktree||""));el.append(left,node("time","",String(w.HEAD||"").slice(0,8)));worktrees.append(el)}if(!worktrees.children.length)empty(worktrees,"Рабочих копий не найдено")}
+  const worktrees=$("worktree-list");worktrees.replaceChildren();
+  const pathKey=path=>String(path||"").replaceAll("\\","/").toLowerCase().replace(/\/$/,"");
+  const leases=s.worktree_leases||[],leaseByPath=new Map(leases.map(l=>[pathKey(l.worktree),l]));
+  for(const w of s.worktrees||[]){
+    const el=node("div","event"),left=node("div"),lease=leaseByPath.get(pathKey(w.worktree));
+    left.append(node("strong","",(w.branch||"detached").replace("refs/heads/","")),node("small","",w.worktree||""));
+    left.append(node("small","",lease?`Lease панели: ${lease.task_id} · ${lease.run_id} · ${lease.state}${lease.stale?" · heartbeat устарел · нужна сверка":""} · владелец процесса не подтверждён`:"Lease панели: нет · использование другими агентами неизвестно"));
+    el.append(left,node("time","",String(w.HEAD||"").slice(0,8)));worktrees.append(el)
+  }
+  for(const lease of leases.filter(l=>!l.registered)){
+    const el=node("div","event"),left=node("div");
+    left.append(node("strong","",lease.task_id+" · "+lease.run_id),node("small","",lease.worktree||""),node("small","","Lease требует сверки: worktree не зарегистрирован"));
+    el.append(left,node("time","",lease.state||"unknown"));worktrees.append(el)
+  }
+  if(!worktrees.children.length)empty(worktrees,"Рабочих копий не найдено")}
 function renderEvents(s){const rotation=$("rotation-list");rotation.replaceChildren();for(const item of (s.rotation||[]).slice(0,12)){const el=node("div","event"),left=node("div");left.append(node("strong","",`${labels[item.agent]||item.agent||"Агент"} · ${item.event||"событие"}`),node("small","",`${item.task||"без ID"} · ${item.role||"роль не указана"}`));el.append(left,node("time","",shortTime(item.ts)));rotation.append(el)}if(!rotation.children.length)empty(rotation,"Запусков в журнале нет");
   renderMuseJobs(s)}
-function renderMuseJobs(s){const results=$("muse-results"),filter=$("muse-filter").value;results.replaceChildren();const names={queued:"ожидает","processing-unverified":"в обработке · не подтверждено",done:"готово",error:"ошибка",timeout:"таймаут",unknown:"неизвестно"};for(const job of s.delegation?.jobs||[]){if(filter!=="all"&&!(filter==="finished"?["done","error","timeout"].includes(job.state):job.state===filter))continue;const el=node("div","event"),left=node("div");left.append(node("strong","",job.id||"Muse"),node("small","",`${names[job.state]||names.unknown} · ${job.role||"роль не указана"} · от ${job.from||"не указано"}`),node("small","",job.provenance||"источник не указан"));if(job.elapsed_s!=null||job.exit_code!=null){const metrics=[];if(job.elapsed_s!=null)metrics.push("Время: "+Math.round(job.elapsed_s)+" с");if(job.exit_code!=null)metrics.push("Код выхода: "+job.exit_code);metrics.push("Стоимость: нет данных");left.append(node("small","",metrics.join(" · ")))}const when=job.finished||job.created;el.append(left,node("time","",when?shortTime(when):"—"));results.append(el)}if(!results.children.length)empty(results,"Заявок этой стадии нет")}
-function renderRuns(s){const list=$("runs-list");if(!list)return;list.replaceChildren();const runs=s.runs||[];set("runs-count",runs.length+" RUNS");const caps=s.capabilities||{};for(const r of runs){const el=node("div","event"),left=node("div");left.append(node("strong","",`${r.id} · ${labels[r.runtime]||r.runtime}`),node("small","",`Задача: ${r.task_id} · Роль: ${r.role||"—"} · PID: ${r.pid||"—"}`));const right=node("div","");const pillCls=r.status==="completed"?"good":r.status==="unknown"?"bad":"";const statusLabel={running:"процесс найден · итог не подтверждён",unknown:"исход неизвестен · нужна сверка",completed:"завершён",failed:"ошибка",cancelled:"отменён"}[r.status]||r.status;right.append(node("span","pill "+pillCls,statusLabel));const canCancel=(caps[r.runtime]||[]).includes("cancel");if(r.status==="running"&&canCancel){const cancelBtn=node("button","soft","Отмена");cancelBtn.style.padding="2px 7px";cancelBtn.style.fontSize="10px";cancelBtn.style.marginLeft="8px";cancelBtn.addEventListener("click",()=>cancelRun(r.id,cancelBtn));right.append(cancelBtn)}const timeEl=node("time","",shortTime(r.started_at));timeEl.style.marginLeft="8px";right.append(timeEl);el.append(left,right);list.append(el)}if(!runs.length)empty(list,"Запусков из панели пока нет; существующие сессии не импортируются")}
+function renderMuseJobs(s){const results=$("muse-results"),filter=$("muse-filter").value;results.replaceChildren();const names={queued:"ожидает","processing-unverified":"в обработке · не подтверждено",done:"заявка завершена",error:"ошибка",timeout:"таймаут",unknown:"неизвестно"};for(const job of s.delegation?.jobs||[]){if(filter!=="all"&&!(filter==="finished"?["done","error","timeout"].includes(job.state):job.state===filter))continue;const el=node("div","event"),left=node("div");left.append(node("strong","",job.id||"Muse"),node("small","",`${names[job.state]||names.unknown} · ${job.role||"роль не указана"} · от ${job.from||"не указано"}`),node("small","",job.provenance||"источник не указан"));if(job.elapsed_s!=null||job.exit_code!=null){const metrics=[];if(job.elapsed_s!=null)metrics.push("Время: "+Math.round(job.elapsed_s)+" с");if(job.exit_code!=null)metrics.push("Код выхода: "+job.exit_code);metrics.push("Стоимость: нет данных");left.append(node("small","",metrics.join(" · ")))}const when=job.finished||job.created;el.append(left,node("time","",when?shortTime(when):"—"));results.append(el)}if(!results.children.length)empty(results,"Заявок этой стадии нет")}
+function renderRuns(s){
+  const claims=(s.board?.tasks||[]).filter(t=>t.status==="in-progress");
+  const claimList=$("claims-list");claimList.replaceChildren();
+  for(const t of claims){
+    const entry=node("div","event"),left=node("div"),open=node("button","task-open",t.id);
+    open.type="button";open.addEventListener("click",()=>openTask(t.id,open));
+    left.append(open,node("small","",t.title+" · "+t.agent),
+      node("small","",("Назначение: "+(t.status_detail||"в работе"))+" · источник: ops/board.md · процесс не проверен"));
+    entry.append(left);claimList.append(entry)
+  }
+  if(!claims.length)empty(claimList,"Активных claims на доске нет");
+  const list=$("runs-list");list.replaceChildren();
+  const runs=s.runs||[],caps=s.capabilities||{};
+  set("runs-count",claims.length+" В РАБОТЕ · "+runs.length+" ЗАПИСЕЙ");
+  const statuses={running:"PID найден · владелец не подтверждён",unknown:"исход неизвестен · нужна сверка",
+    completed:"завершён",failed:"ошибка",cancelled:"отменён",queued:"в очереди",
+    "processing-unverified":"файл в обработке · процесс не подтверждён",done:"заявка завершена",
+    error:"ошибка",timeout:"таймаут"};
+  for(const r of runs){
+    const entry=node("div","event"),left=node("div"),right=node("div");
+    const source=r.source_kind==="muse-queue"?"Очередь Muse":"Реестр панели";
+    left.append(node("strong","",r.id+" · "+(labels[r.runtime]||r.runtime||"агент")),
+      node("small","",(r.task_id?"Задача: "+r.task_id+" · ":"")+
+        "Роль: "+(r.role||"—")+" · "+source),
+      node("small","",(r.provenance||"источник не указан")+" · "+
+        (r.state_quality==="file-stage"?"файловая стадия":r.state_quality==="pid-only"?"PID-проверка без подтверждения владельца":"локальная запись")));
+    const metrics=[];
+    if(r.elapsed_s!=null)metrics.push("Время: "+Math.round(r.elapsed_s)+" с");
+    if(r.exit_code!=null)metrics.push("Код выхода: "+r.exit_code);
+    metrics.push("Стоимость: "+(r.cost?.usd==null?"нет данных":r.cost.usd+" USD"));
+    left.append(node("small","",metrics.join(" · ")));
+    const pillCls=["completed","done"].includes(r.status)?"good":
+      ["unknown","failed","error","timeout"].includes(r.status)?"bad":"";
+    right.append(node("span","pill "+pillCls,statuses[r.status]||r.status));
+    if(r.managed){const eventsButton=node("button","soft","События");eventsButton.type="button";eventsButton.addEventListener("click",()=>loadRunEvents(r.id));right.append(eventsButton)}
+    const canCancel=r.managed&&(caps[r.runtime]||[]).includes("cancel");
+    if(r.status==="running"&&canCancel){
+      const button=node("button","soft","Отмена");
+      button.addEventListener("click",()=>cancelRun(r.id,button));right.append(button)
+    }
+    const stamp=node("time","",shortTime(r.started_at));stamp.style.marginLeft="8px";
+    right.append(stamp);entry.append(left,right);list.append(entry)
+  }
+  if(!runs.length)empty(list,"Записей запусков и заявок пока нет")
+}
+async function loadRunEvents(runId,after=0,append=false){
+  if(!runId)return;
+  selectedRunId=runId;
+  const detail=$("run-detail"),list=$("run-event-list");
+  detail.hidden=false;set("run-detail-title",runId);
+  if(!append)empty(list,"Загружаем события…");
+  try{
+    const url="/api/run/events?id="+encodeURIComponent(runId)+"&after="+after;
+    const response=await fetch(url,{headers:{"X-Control-Token":token},cache:"no-store"});
+    const packet=await response.json();
+    if(!response.ok)throw Error(packet.error||"HTTP "+response.status);
+    if(selectedRunId!==runId)return;
+    if(!append)list.replaceChildren();
+    else list.querySelector(".events-more")?.remove();
+    for(const event of packet.events||[]){
+      const entry=node("div","event"),name=node("strong","",event.type||"событие");
+      entry.append(name,node("time","",shortTime(event.ts)+" · #"+event.cursor));
+      list.append(entry)
+    }
+    if(!list.children.length)empty(list,"Событий после выбранного курсора нет");
+    if(packet.has_more){
+      const more=node("button","soft events-more","Следующие события");
+      more.type="button";
+      more.addEventListener("click",()=>loadRunEvents(runId,packet.next_cursor,true));
+      list.append(more)
+    }
+  }catch(err){if(selectedRunId===runId)empty(list,"Не удалось загрузить события: "+err.message)}
+}
 async function cancelRun(runId,button){if(!confirm(`Отменить запуск ${runId}?`))return;button.disabled=true;try{const res=await fetch("/api/run/cancel",{method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify({run_id:runId})});const result=await res.json();if(!res.ok||!result.ok)throw Error(result.error||"Не удалось отменить запуск");toast("Запуск "+runId+" отменён");await refresh()}catch(err){toast(err.message,true)}finally{button.disabled=false}}
 async function launchAgent(){if(!selectedTask)return;const button=$("launch-button");if(!confirm(`Запустить агента для задачи ${selectedTask.id}?`))return;button.disabled=true;try{const response=await fetch("/api/runs",{method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify({task_id:selectedTask.id,role:$("plan-role").value,agent:$("plan-agent").value})});const result=await response.json();if(!response.ok||!result.ok)throw Error(result.error||"Не удалось запустить агента");toast("Запуск "+result.run.id+" успешно создан");closeTask();await refresh()}catch(err){toast(err.message,true)}finally{button.disabled=false}}
 function renderLog(){set("log-output",(data?.logs?.[$("log-select").value]||[]).join("\n")||"Нет записей")}
 async function refresh(){try{const res=await fetch("/api/state",{headers:{"X-Control-Token":token},cache:"no-store"});if(!res.ok)throw Error("HTTP "+res.status);data=await res.json();renderOverview(data);renderTasks();renderRuntimes(data);renderRuns(data);renderInventory(data);renderEvents(data);renderLog()}catch(err){toast("Не удалось обновить данные: "+err.message,true);set("updated","Нет связи")}}
 async function runAction(name,button){const names={"engine.start":"запустить demo-движок","engine.stop":"остановить движок","delegation.pause":"поставить очередь Muse на паузу","delegation.stop":"остановить runner Muse"};if(!confirm("Подтвердите действие: "+names[name]+"?"))return;button.disabled=true;try{const res=await fetch("/api/action",{method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify({action:name})});const result=await res.json();if(!res.ok||!result.ok)throw Error(result.error||result.output||"Команда завершилась с ошибкой");toast(result.output||"Действие выполнено");await refresh()}catch(err){toast(err.message,true)}finally{button.disabled=false;if(data)renderOverview(data)}}
-$("refresh").addEventListener("click",refresh);$("task-search").addEventListener("input",renderTasks);$("task-filter").addEventListener("change",renderTasks);$("muse-filter").addEventListener("change",()=>renderMuseJobs(data||{}));$("log-select").addEventListener("change",renderLog);$("drawer-close").addEventListener("click",closeTask);$("drawer-backdrop").addEventListener("click",closeTask);document.addEventListener("keydown",event=>{if($("task-drawer").hidden)return;if(event.key==="Escape")closeTask();if(event.key==="Tab"){const controls=[...$("task-drawer").querySelectorAll("button:not(:disabled),select:not(:disabled)")],first=controls[0],last=controls.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}});$("plan-button").addEventListener("click",planTask);$("launch-button").addEventListener("click",launchAgent);$("handoff-button").addEventListener("click",prepareHandoff);$("handoff-copy").addEventListener("click",copyHandoff);document.querySelectorAll("[data-action]").forEach(b=>b.addEventListener("click",()=>runAction(b.dataset.action,b)));refresh();setInterval(refresh,10000);
+$("run-detail-close").addEventListener("click",()=>{selectedRunId=null;$("run-detail").hidden=true});$("run-detail-refresh").addEventListener("click",()=>loadRunEvents(selectedRunId));$("refresh").addEventListener("click",refresh);$("task-search").addEventListener("input",renderTasks);$("task-filter").addEventListener("change",renderTasks);$("muse-filter").addEventListener("change",()=>renderMuseJobs(data||{}));$("log-select").addEventListener("change",renderLog);$("drawer-close").addEventListener("click",closeTask);$("drawer-backdrop").addEventListener("click",closeTask);document.addEventListener("keydown",event=>{if($("task-drawer").hidden)return;if(event.key==="Escape")closeTask();if(event.key==="Tab"){const controls=[...$("task-drawer").querySelectorAll("button:not(:disabled),select:not(:disabled)")],first=controls[0],last=controls.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}});$("plan-button").addEventListener("click",planTask);$("launch-button").addEventListener("click",launchAgent);$("handoff-button").addEventListener("click",prepareHandoff);$("handoff-copy").addEventListener("click",copyHandoff);document.querySelectorAll("[data-action]").forEach(b=>b.addEventListener("click",()=>runAction(b.dataset.action,b)));refresh();setInterval(refresh,10000);
