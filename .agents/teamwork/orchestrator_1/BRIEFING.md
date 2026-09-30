@@ -68,7 +68,8 @@ Orchestrate the full implementation of Trading Insights (Funding Carry, Mean Rev
 | m2_worker_1 | worker | M2 MR runner (src/mr_trader.py, dry-run only) | completed (58/58 slice OK; 0 orders) | subagent-2 |
 | reviewer_1 | reviewer+challenger | M1–M4 review gate | completed (M3 PASS; M1/M2/M4 PASS-WITH-NOTES; no VETO) | subagent-5 |
 | e2e_worker_1 | e2e+regression+boardsync | M5–M6 final | completed (1033: 38+6 pre-existing; scope 149/149; engine +34; R5 E2E ok; 6 board rows) | subagent-6 |
-| f1_tags_1 | worker | Follow-up 1: botcar/botmr registry | completed (85+40+70 green; hex-gate fix) | subagent-7 |
+| f1_tags_1 | worker | Follow-up 1: botcar/botmr registry | completed + VERIFIED (85/40/70 confirmed) | subagent-7 |
+| f1_verify_1 | verifier | F1 claims re-run | completed (CONFIRMED) | subagent-10 |
 | f2_carrylive_1 | trader-worker | Follow-up 2: live demo carry pair | in-progress | subagent-9 |
 | f3_sandbox_1 | worker | Follow-up 3: 38+6 sandbox reds | in-progress | subagent-8 |
 | m3_worker_1 | worker | M3 Treasury controller (src/treasury_exec.py) | completed (29/29 tests OK) | subagent-3 |

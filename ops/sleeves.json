@@ -31,6 +31,8 @@
     "*": {
       "bot": "engine",
       "botr": "engine",
+      "botcar": "funding_carry",
+      "botmr": "signal",
       "botsdca": "dca",
       "bottdca": "tests",
       "botldca": "dca",
