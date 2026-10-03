@@ -108,6 +108,7 @@ def pair_sizes(*, equity: float, spot_px: float, spot_lot_sz: float = 0.0,
         from . import risk as risk_mod  # локально: импорт без БД, БД трогает _c()
     if risk_pct is None:
         risk_pct = risk_mod.DEFAULT_RISK_PCT
+    assert risk_pct is not None
     cap_pct = risk_mod.MAX_POSITION_PCT
     stop = synthetic_stop(spot_px, risk_pct, cap_pct)
     unit = spot_lot_sz if spot_lot_sz > 0 else 1.0
