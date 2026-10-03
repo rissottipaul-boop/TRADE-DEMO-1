@@ -1,6 +1,6 @@
 # Задачи, запуски и наблюдаемость AI — пункты 21–30 и 39–48
 
-Дата: 03.10.2026 (+05:00). Статус: локальная реализация и серверная приёмка; внешний Agents API ожидает решения `AI-OPENAI-ADAPTER-ACCESS`, визуальная проверка — `AI-UI-BROWSER-VERIFY`.
+Дата: 03.10.2026 (+05:00). Статус: локальная реализация; общая unit-приёмка пройдена 03.10 20:07 (`AI-ACCEPTANCE-UNIT`, раздел «Общая unit-приёмка» ниже); внешний Agents API ожидает решения `AI-OPENAI-ADAPTER-ACCESS`, визуальная проверка — `AI-UI-BROWSER-VERIFY`.
 
 Реализация дополняет существующий Agent Control Plane. Источник задач — [ops/board.md](../ops/board.md), роли — `.github/agents/`, права — [AGENTS.md](../AGENTS.md). Новая доска или параллельный торговый исполнитель не создаются.
 
@@ -76,6 +76,14 @@
 Первый полный suite обнаружил пустой `src/perimeter.py`, появившийся в параллельном claim `PERIMETER-DRIFT-CHECK`. Чужой файл не исправляется этой задачей; после завершения claim общий suite необходимо повторить. Общий diff check также видит ранее изменённый `src/backtest/grid_gate.py` (пустая строка EOF); проверка файлов этой реализации выполняется отдельно.
 
 Повторный полный suite после интеграции: **1357 tests, 1 failure, 2 skipped**, `logs/ai-full-unit-tests-final.log`. Единственное падение — тот же `tests.test_empty_files` на пустом `src/perimeter.py`. Обе попытки записаны в `AI-ACCEPTANCE-UNIT`; AI-задачи не помечены `done`, пока общий критерий не выполнен. Код и установка локального слоя завершены; общая unit-приёмка и визуальная проверка ждут устранения внешних блокеров.
+
+### Общая unit-приёмка 03.10 20:07
+
+После завершения `PERIMETER-DRIFT-CHECK` полный suite на HEAD `6794c67` (AI-код — коммит `b30ca77`) зелёный: `.venv/Scripts/python.exe -m unittest discover -s tests` — **Ran 1370, OK (skipped=2)**, лог `logs/ai-full-unit-tests-acceptance.log`. Целевой пакет из семи модулей (158 тестов, лог `logs/ai-targeted-tests-acceptance.log`) прошёл с одним сбоем транспорта, о нём ниже. Node boundary Morphy **32/32** (`logs/ai-morphy-api-tests-acceptance.log`). Сборка esbuild, `node --check` для `app.js` и контраст зелёные (`logs/ai-morphy-build-acceptance.log`, `logs/ai-morphy-contrast-acceptance.log`). `ai_evals builtin` — **11/11** (`logs/ai-evals-builtin-acceptance.log`). `ai_observability usage` при нуле запусков даёт `cost_quality=unknown`, а не ноль (`logs/ai-usage-acceptance.json`). Мост `src.ai_tools_cli` отвечает и отклоняет `shell.run` кодом 2. Установленные копии Morphy совпадают с `ops/morphy/`.
+
+HTTP smoke интерфейса — **15/15** (`logs/ai-panel-http-smoke-acceptance.log`). Он шёл на временном сервере Контура (свободный порт, свой токен) на текущем checkout. Проверены: страница и AI-элементы; вызовы AI API из `app.js`; 403 без токена; наблюдаемость; evals; черновик без записи доски; structured handoff; review `requires-human-review`. Capabilities не заявляют resume/cancel/steer; отказ `shell.run` — 400. Это не визуальная проверка: скриншоты и клики остаются в `AI-UI-BROWSER-VERIFY`.
+
+Известный дефект вне AI-логики. Контур отвечает 403 до чтения тела POST: так с 30.09, коммит `36ec2ce`. На Windows непрочитанное тело иногда приводит к RST вместо ответа (WinError 10053/10054). Повторы `test_control_panel.HttpTests` + `test_ai_panel_api` падали в 2 из 20 прогонов, а в целевом прогоне сбой был один. Отдельное воспроизведение: 3 из 600 запросов без токена. AI-тесты `test_ai_panel_api` в повторах не падали. Исправление вынесено в отдельную задачу доски.
 
 ## Внешний OpenAI адаптер
 
