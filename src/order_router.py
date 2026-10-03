@@ -241,11 +241,14 @@ class OrderRouter:
         risk_pct: float = risk.DEFAULT_RISK_PCT,
         owner: Optional[str] = None,     # код владельца clOrdId; None -> владелец роутера
         is_exit: bool = False,           # True -> выход из позиции (place_exit_order)
+        count_as_entry: bool = True,     # False -> обслуживающий ордер (сетки), обходит register_entry
     ) -> dict:
         """Выставить ордер через риск-слой. Возвращает dict с ok=True/False.
 
         По умолчанию это ВХОД. is_exit=True — выход из позиции: вызов уходит в
         place_exit_order (px, sz, owner), параметры сайзинга и стопа не нужны.
+        count_as_entry=False — обслуживающий ордер (GRID-IMPL): обходит register_entry
+        и проверку лимита entries_today, но kill-switch и breaker'ы соблюдаются.
         При ok=False ордер на биржу НЕ уходил; причина в полях stage/reason.
         Исключения биржи (ccxt) не глушатся — okx_call уже залогировал sCode/sMsg.
         Незарегистрированный или не bot* владелец — ValueError до риск-проверки.
@@ -255,11 +258,26 @@ class OrderRouter:
         owner_code = order_owner.require(owner, own=True).code if owner else self.owner
 
         # 1. Допуск риск-слоя
-        allowed, reason = risk.check_entry_allowed(inst_id, side)
-        if not allowed:
-            log.warning("place_order ОТКЛОНЁН risk: %s %s %s — %s",
-                        inst_id, side, ord_type, reason)
-            return {"ok": False, "stage": "check_entry_allowed", "reason": reason}
+        if count_as_entry:
+            allowed, reason = risk.check_entry_allowed(inst_id, side)
+            if not allowed:
+                log.warning("place_order ОТКЛОНЁН risk: %s %s %s — %s",
+                            inst_id, side, ord_type, reason)
+                return {"ok": False, "stage": "check_entry_allowed", "reason": reason}
+        else:
+            status = risk.status()
+            if status.get("kill_active"):
+                reason = "kill_switch активен (сброс только вручную)"
+                log.warning("place_order (servicing) ОТКЛОНЁН risk: %s — %s", inst_id, reason)
+                return {"ok": False, "stage": "kill_switch", "reason": reason}
+            if status.get("global_breaker"):
+                reason = "глобальный breaker: drawdown >= 15% от HWM, нужен ручной сброс"
+                log.warning("place_order (servicing) ОТКЛОНЁН risk: %s — %s", inst_id, reason)
+                return {"ok": False, "stage": "global_breaker", "reason": reason}
+            if status.get("daily_breaker"):
+                reason = "дневной лимит убытка -6% исчерпан (сброс 00:00 UTC)"
+                log.warning("place_order (servicing) ОТКЛОНЁН risk: %s — %s", inst_id, reason)
+                return {"ok": False, "stage": "daily_breaker", "reason": reason}
 
         # 2. Размер позиции
         if sz is None:
@@ -331,12 +349,14 @@ class OrderRouter:
             raw_json=json.dumps(order, ensure_ascii=False, default=str),
             cl_ord_id=cl_ord_id,
         ))
-        risk.register_entry(inst_id, side, risk_pct)
-        # Остаток позиции для выхода (ROUTER-EXIT): верхняя граница — размер ордера
-        risk.register_entry_size(inst_id, side, sz)
+        if count_as_entry:
+            risk.register_entry(inst_id, side, risk_pct)
+            # Остаток позиции для выхода (ROUTER-EXIT): верхняя граница — размер ордера
+            risk.register_entry_size(inst_id, side, sz)
         return {
             "ok": True,
             "exit": False,
+            "count_as_entry": count_as_entry,
             "order_id": ord_id,
             "exchange_order_id": exchange_order_id,
             "cl_ord_id": cl_ord_id,

@@ -32,6 +32,7 @@
       "bot": "engine",
       "botr": "engine",
       "botcar": "funding_carry",
+      "botg": "native_grid",
       "botmr": "signal",
       "botsdca": "dca",
       "bottdca": "tests",

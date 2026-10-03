@@ -49,6 +49,7 @@ ROUTER = "botr"         # OrderRouter, стратегия не назвала в
 CARRY = "botcar"        # Funding Carry (src.carry_executor)
 MR = "botmr"            # Mean Reversion (src.mr_trader)
 DCA = "botsdca"         # DCA-бот demo (src.dca_bot)
+GRID = "botg"           # Grid-бот demo (src.grid_bot)
 DCA_DEMO_RUN = "bottdca"  # прогон DCA-бота src.dca_demo_run
 LIVE_DCA = "botldca"    # рукав dca live-кармана (src.live_runner)
 LOAD_TEST = "lt"        # src.load_test (P1-LOAD)
@@ -88,6 +89,7 @@ OWNERS: tuple[Owner, ...] = (
     Owner(CARRY, "Funding Carry src/carry_executor.py", "Insight Executor", "strategy"),
     Owner(MR, "Mean Reversion src/mr_trader.py", "Insight Executor", "strategy"),
     Owner(DCA, "DCA-бот demo src/dca_bot.py", "Insight Executor", "strategy"),
+    Owner(GRID, "Grid-бот demo src/grid_bot.py", "Insight Executor", "strategy"),
     Owner(DCA_DEMO_RUN, "Прогон DCA-бота src/dca_demo_run.py", "Insight Executor", "test",
           "через OrderRouter: ордера пишутся в storage движка"),
     Owner(LIVE_DCA, "Рукав dca live-кармана src/live_runner.py", "Insight Executor", "live"),
