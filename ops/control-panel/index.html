@@ -15,6 +15,7 @@
       <nav aria-label="Разделы">
         <a href="#overview" class="nav-link active">Обзор <span>01</span></a>
         <a href="#tasks" class="nav-link">Задачи <span>02</span></a>
+        <a href="#assistant" class="nav-link">Помощник <span>AI</span></a>
         <a href="#runtimes" class="nav-link">Агенты <span>03</span></a>
         <a href="#runs" class="nav-link">Запуски <span>04</span></a>
         <a href="#events" class="nav-link">События <span>05</span></a>
@@ -46,7 +47,7 @@
           <div class="process"><div><div class="process-name">Торговый движок <span id="engine-badge" class="pill">—</span></div><p id="engine-message">Ожидание состояния</p></div><div class="process-buttons"><button data-action="engine.start">Запустить</button><button data-action="engine.stop" class="soft">Остановить</button></div></div>
           <div class="process"><div><div class="process-name">Muse runner <span id="muse-badge" class="pill">—</span></div><p id="muse-message">Очередь делегирования</p></div><div class="process-buttons"><button data-action="delegation.pause" class="soft">Пауза</button><button data-action="delegation.stop" class="soft">Остановить</button></div></div>
           <div class="process"><div><div class="process-name">Мониторинг Netdata <span id="netdata-badge" class="pill">—</span></div><p id="netdata-message">Метрики хоста и алерты в реальном времени</p></div><div class="process-buttons"><a id="netdata-link" href="http://127.0.0.1:19999" target="_blank" rel="noopener noreferrer" class="netdata-btn">Открыть 19999</a></div></div>
-          <div class="notice">Запуск агентов и снятие паузы Muse появятся после проверки guard в каждом рантайме. Пульт не меняет торговые лимиты и решения человека.</div>
+          <div class="notice">Доступность запуска определяется проверкой guard каждого рантайма. Пульт сохраняет торговые лимиты и решения человека.</div>
 
         </article>
         <article class="panel health-panel">
@@ -61,6 +62,26 @@
         <div class="table-wrap"><table><thead><tr><th>ID</th><th>Задача</th><th>Исполнитель</th><th>Статус</th></tr></thead><tbody id="tasks-body"></tbody></table></div>
         <p class="table-hint">Выберите ID, чтобы открыть критерий, заметки и план маршрутизации.</p>
         <p id="duplicates" class="warning" hidden></p>
+      </section>
+
+      <section id="assistant" class="panel section-panel">
+        <div class="panel-head"><div><div class="eyebrow">ЗАДАЧИ И ПЕРЕДАЧА РАБОТЫ</div><h2>Помощник по задачам</h2></div><span class="badge">ТОЛЬКО ЧТЕНИЕ</span></div>
+        <p class="subtle">Опишите проблему. Помощник предложит роль и черновик с критерием готовности для единой доски проекта.</p>
+        <form id="draft-form" class="assistant-form">
+          <label for="draft-description">Описание проблемы</label>
+          <textarea id="draft-description" maxlength="4000" rows="4" required placeholder="Что происходит, какого результата вы ожидаете и как его проверить?"></textarea>
+          <div class="handoff-actions"><button id="draft-button" class="primary-button" type="submit">Подготовить задачу</button><button id="draft-copy" class="ghost" type="button" hidden>Скопировать черновик</button></div>
+        </form>
+        <pre id="draft-result" class="handoff-result" aria-live="polite" tabindex="0" hidden></pre>
+      </section>
+
+      <section id="ai-observability" class="panel section-panel">
+        <div class="panel-head"><div><div class="eyebrow">РАСХОД И КАЧЕСТВО</div><h2>Работа AI</h2></div><button id="eval-button" class="ghost" type="button">Проверочные сценарии</button></div>
+        <div id="ai-metrics" class="ai-metrics" aria-live="polite">Получаем данные…</div>
+        <div id="ai-alerts" class="event-list"></div>
+        <div id="ai-functions" class="event-list"></div>
+        <details><summary>Последние действия помощника</summary><div id="ai-actions" class="event-list"></div></details>
+        <pre id="eval-result" class="handoff-result" aria-live="polite" tabindex="0" hidden></pre>
       </section>
 
       <section id="runtimes" class="panel section-panel">
@@ -78,8 +99,11 @@
         <div id="run-detail" class="run-detail" hidden>
           <div class="panel-head"><div><div class="eyebrow">СОБЫТИЯ ЛОКАЛЬНОГО ЗАПУСКА</div><h3 id="run-detail-title">—</h3></div><div class="process-buttons"><button id="run-detail-refresh" class="soft" type="button">Обновить</button><button id="run-detail-close" class="soft" type="button">Закрыть</button></div></div>
           <div id="run-event-list" class="event-list" aria-live="polite"></div>
+          <div class="handoff-actions"><button id="run-result-button" class="ghost" type="button">Результат запуска</button><button id="run-context-button" class="ghost" type="button">Контекст для продолжения</button><button id="run-resume-button" class="primary-button" type="button" hidden>Продолжить сессию</button><button id="run-packet-copy" class="ghost" type="button" hidden>Скопировать</button></div>
+          <pre id="run-packet" class="handoff-result" aria-live="polite" tabindex="0" hidden></pre>
+          <p id="run-stream-state" class="table-hint">События выбранного запуска обновляются каждые 3 секунды.</p>
         </div>
-        <p class="table-hint">Заявки Muse отражают стадию файла. Запуск через панель закрыт до проверки guard; отмена и управление существующими сессиями пока недоступны.</p>
+        <p class="table-hint">Заявки Muse отражают стадию файла. Команды управления показываются по подтверждённым возможностям адаптера. Для продолжения доступен пакет контекста.</p>
       </section>
 
       <section class="columns workspace-section">
@@ -108,8 +132,13 @@
         <div class="handoff-actions"><button id="handoff-button" class="primary-button" type="button">Сформировать пакет</button><button id="handoff-copy" class="ghost" type="button" hidden>Скопировать</button></div>
         <pre id="handoff-result" class="handoff-result" aria-live="polite" tabindex="0" hidden></pre>
       </div>
+      <div class="detail-block"><h3>Проверка перед приёмкой</h3><p class="subtle">Изменённые файлы, критерий задачи и замечания по правилам проекта. Итоговую приёмку подтверждает рецензент.</p>
+        <button id="review-button" class="ghost" type="button">Проверить diff</button>
+        <pre id="review-result" class="handoff-result" aria-live="polite" tabindex="0" hidden></pre>
+      </div>
       <div class="detail-block planner-block"><h3>Маршрутизация агента</h3><p class="subtle">План показывает CLI и guard, не запускает модель.</p>
         <div class="planner-fields"><label>Роль<select id="plan-role"></select></label><label>Рантайм<select id="plan-agent"><option value="auto">Автоматически</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="gemini">Gemini CLI</option><option value="muse">Muse Code</option></select></label></div>
+        <p class="subtle">Кодовая задача запускается в отдельном worktree от чистого HEAD. Если checkout занят изменениями, сначала требуется их штатная сверка и сохранение.</p>
         <div class="handoff-actions"><button id="plan-button" class="primary-button" type="button">Построить план</button><button id="launch-button" class="primary-button" type="button" hidden>Запустить агента</button></div>
         <div id="plan-result" class="plan-result" aria-live="polite"></div>
       </div>

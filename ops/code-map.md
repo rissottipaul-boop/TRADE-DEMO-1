@@ -15,6 +15,11 @@
 | `src/account_mode.py` | Режим аккаунта (`acctLv`, autoLoan): tdMode спота и запрет скрытого займа — для роутера, движка, скриптов и live-preflight |
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/agent_context.py` | Адресное чтение доски для агентов (AGENT-TOKEN-ECONOMY): карточка задачи дословно, транзитивные зависимости, активные claims, дубликаты ID; разбор — `ops/hooks/autopilot.py`, без записи и сети |
+| `src/agent_assistant.py` | Пункты 21–23, 28–29: локальный черновик задачи/роль, доказательства handoff, ограниченный diff review и специалисты с facts/sources; не записывает доску и не вызывает модель — [границы и приёмка](../insights/agent-ai-workflows.md) |
+| `src/ai_observability.py` | Пункты 39–40, 44–48: редактирование секретов, закрытые read-only схемы инструментов, SQLite-журнал действий, reported/unknown usage, ошибки и атомарное резервирование идемпотентных запросов |
+| `src/ai_evals.py` | Пункты 41–43: локальные сценарии свежести и правил, сравнение сохранённых baseline/candidate ответов и проверка шагов трасс; не подменяет оценку реальной модели учебными фикстурами |
+| `src/ai_tools_cli.py` | JSON stdin-мост Morphy к тем же валидируемым read-only инструментам control_panel; описания задач не передаются в командной строке, shell и торговых действий нет |
+| `src/agent_run_report.py` | Структурированный отчёт запуска: фиксированный schema-validated artifact `data/run-results/<run_id>.json`, файлы/проверки/внешние IDs/следующий шаг; reported без автоматической приёмки |
 | `src/control_panel.py` + `ops/control-panel/` | Локальный веб-пульт «Контур»: доска, рантаймы, движок, риск, очередь Muse, единая активность и курсор локальных событий; allowlist ops-действий, localhost + токен, без Flowise — [инструкция](control-panel/README.md) |
 | `src/morphy_project.py` + `ops/morphy/` | Экран общего проекта в локальном Morphy: read-only проекция единой доски, карточки задач, риск/движок, equity, AI-рантаймы, очередь Muse, Netdata, Obsidian, Telegram, Git и модули. API требует существующую сессию Morphy; не запускает агентов и не меняет торговлю — [инструкция](morphy/README.md) |
 | `src/worktree_lease.py` | Резервирование задачи и изолированного Git worktree от чистого HEAD, heartbeat и инспекция регистрации; не запускает агента и не освобождает lease автоматически |
@@ -39,6 +44,7 @@
 | ops/deploy-vps.ps1, ops/deploy-vps.sh | Скрипты развертывания 24/7 VPS, проверка NTP/латентности, бэкап баз SQLite — insights/deploy-vps.md |
 | `src/netdata_monitor.py` | Модуль проверки здоровья и метрик Netdata (NETDATA-MONITOR): опрос `/api/v1/info`, сбор версии, ядер CPU, алертов (критичные/предупреждения); CLI `python -m src.netdata_monitor` — [insights/netdata-monitoring.md](../insights/netdata-monitoring.md) |
 | `src/notify.py` | Алерты Sentinel (ALERTS-IMPL): уровни INFO/WARNING/CRITICAL, Telegram через urllib (токены из env, fallback в `data/alerts.jsonl`), дедупликация по alert_key с cooldown; CLI `python -m src.notify --test "…" / --status` |
+| `src/analytics/` | Аналитика стратегий и результатов (ANALYTICS-LAB, п. 31–38): драфт/прогон бэктеста, сравнение прогонов, сводка с ограничениями, разбор сделок, проверка гипотез, поиск по инсайтам, сценарии риска, объяснение метрик панели; только чтение — [инсайт](../insights/analytics-lab.md) |
 | `ops/netdata/docker-compose.yml`, `ops/netdata.ps1` | Инфраструктура мониторинга Netdata: локальный docker-compose сервиса `netdata`, PowerShell-скрипт управления (`start`, `stop`, `restart`, `status`, `url`, `logs`) на порту 19999 |
 | Дубли консолидированы (ARCH-DEDUP): `state.py` и `ws_public.py` удалены, канон — `storage.py` + `ws_client.py` | |
 
@@ -65,11 +71,14 @@
 | Ротация AI-агента | `ops\agent-rotate.ps1` — авто (Claude → Antigravity → Muse → Codex), `-Role <роль>` (приоритеты и модели из `ops/agent-routing.json`), `-TaskId`, `-SkipAgent`, `-Plan`, `-Headless`, `-Prompt "..."` — [agent-team.md](agent-team.md) |
 | Адресное чтение доски | `python -m src.agent_context` — обзор без критериев; `--task <ID>` — полная карточка, зависимости, все активные claims; `--stats` — байты до/после. 0 — ок, 2 — доску читать напрямую. Правила — [token-economy.md](token-economy.md) |
 | Локальная панель | `.venv\Scripts\python.exe -m src.control_panel [--port 8765]` — ссылка с токеном, только 127.0.0.1; [действия и API](control-panel/README.md) |
+| AI контрольные сценарии | `.venv\Scripts\python.exe -m src.ai_evals builtin` — 11 offline-проверок; `cases`, `answers --input file.json`, `compare --baseline before.json --candidate after.json`, `trace --input trace.json`; необязательный `--output report.json` |
+| AI журнал и расход | `.venv\Scripts\python.exe -m src.ai_observability usage` — локальная сводка reported/unknown, модели, задержки функций, ошибки; нет запроса к провайдеру |
 | Morphy: данные проекта | `.venv\Scripts\python.exe -m src.morphy_project [--task ID]` — JSON-проекция без секретов и сырых логов; только чтение. `ops\morphy\deploy-project.ps1` устанавливает собственные компоненты в workspace версии 0.5.0 |
 | Morphy: локальная копия | `ops\morphy\trial.ps1 start / status / stop` — Node 22, отдельное состояние, только localhost 7480; допускает настроенный человеком AI, запрещает relay и кошелёк; профили не меняет |
 | Делегирование Muse | `ops\delegate.ps1 status / start / stop / submit -Prompt "…" -From <рантайм> -Role <роль> / fetch -Id <id>` — [delegations/README.md](delegations/README.md) |
 | Управление Netdata | `ops\netdata.ps1 status` / `start` / `stop` / `restart` / `url` / `logs` — управление локальным контейнером Netdata (порт 19999) |
 | Метрики Netdata | `python -m src.netdata_monitor [--json]` — опрос API Netdata (/api/v1/info), статус, ядра CPU, алерты |
+| Аналитика п. 31–38 | `python -m src.analytics <subcommand> [--json] [--md file.md]` — подкоманды `bt-draft`, `bt-run`, `bt-summary`, `bt-compare`, `trade-review`, `hypothesis`, `insights`, `risk-scenarios`, `panel-metrics` (только чтение) |
 
 | Файл | Назначение |
 | --- | --- |

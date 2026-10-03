@@ -16,7 +16,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 // run/describe: undefined — фейк по умолчанию; null — настоящий код модуля поверх exec
-function harness({ valid = true, collect = async () => ({ schema_version: 1, board: {} }), describe, run, exec } = {}) {
+function harness({ valid = true, collect = async () => ({ schema_version: 1, board: {} }), describe, run, exec, tool } = {}) {
   const clock = { t: 1_000_000 };
   let middleware;
   let errorHandler;
@@ -35,6 +35,7 @@ function harness({ valid = true, collect = async () => ({ schema_version: 1, boa
     };
   }
   if (exec) options.exec = exec;
+  if (tool) options.tool = tool;
   mountProjectRoutes({
     use: (_path, fn) => { if (fn.length === 4) errorHandler = fn; else middleware = fn; },
     get: (path, fn) => { routes[`GET ${path}`] = fn; },
@@ -70,6 +71,45 @@ function harness({ valid = true, collect = async () => ({ schema_version: 1, boa
 }
 
 // --- Существующие границы чтения ---
+
+test('AI read-only инструменты требуют сессии, свой origin и закрытую схему', async () => {
+  const calls = [];
+  const h = harness({ tool: async (name, args) => { calls.push([name, args]); return { ok: true, result: { markdown: 'Черновик' } }; } });
+  const path = '/api/project/ai/tool';
+  const body = { name: 'assistant.draft', arguments: { description: 'Проверить зависание агента' } };
+  assert.equal((await h.post(path, body, { token: null })).code, 401);
+  assert.equal((await h.post(path, body, { origin: 'http://foreign.example' })).code, 403);
+  assert.equal((await h.post(path, { ...body, write: true })).code, 400);
+  for (const name of ['run.start', 'run.cancel', 'shell', 'orders.place', 'kill.reset']) {
+    assert.equal((await h.post(path, { name, arguments: {} })).code, 400);
+  }
+  assert.equal(calls.length, 0);
+  const response = await h.post(path, body);
+  assert.equal(response.code, 200);
+  assert.deepEqual(response.data, { ok: true, result: { markdown: 'Черновик' } });
+  assert.deepEqual(calls, [[body.name, body.arguments]]);
+});
+
+test('AI payload отделён по размеру от управляющих действий и ошибки не раскрывают данные', async () => {
+  const h = harness({ tool: async () => ({ ok: false, error: SECRET }) });
+  const body = { name: 'assistant.draft', arguments: { description: 'П'.repeat(4000) } };
+  const response = await h.post('/api/project/ai/tool', body);
+  assert.equal(response.code, 400);
+  assert.deepEqual(response.data, { error: 'invalid-ai-arguments' });
+  assert.ok(!JSON.stringify(response.data).includes(SECRET));
+  assert.equal((await h.post('/api/project/ai/tool', body, { length: '20001' })).code, 413);
+  assert.equal((await h.post('/api/project/action/arm', { action: 'engine.pause' }, { length: '2049' })).code, 413);
+});
+
+test('AI crash и нераспознанный ответ не выдаются за успешную работу', async () => {
+  for (const tool of [async () => { throw new Error(SECRET); }, async () => ({ stdout: SECRET })]) {
+    const h = harness({ tool });
+    const response = await h.post('/api/project/ai/tool', { name: 'ai.usage', arguments: {} });
+    assert.equal(response.code, 503);
+    assert.deepEqual(response.data, { error: 'ai-tool-unavailable' });
+    assert.ok(!JSON.stringify(response.data).includes(SECRET));
+  }
+});
 
 test('без токена данные не читаются', async () => {
   const h = harness();

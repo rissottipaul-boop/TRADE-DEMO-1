@@ -644,7 +644,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["run"]["id"], "run_T1_http")
         start_mock.assert_called_once_with(self.root, "T1", "insight-executor", "codex",
-                                           idempotency_key=None, model=None, workspace="checkout")
+                                           idempotency_key=None, model=None, workspace="worktree")
 
         # Get run by ID
         with patch.object(panel, "_get_run", return_value=fake_run):

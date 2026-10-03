@@ -1,11 +1,13 @@
 """Guard-хук агентов: опасное блокируется, обычная работа — нет."""
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -319,10 +321,116 @@ class HookContractTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def run_hook(self, payload):
-        proc = subprocess.run([sys.executable, str(GUARD_PATH)], input=json.dumps(payload).encode(),
+        return self.run_raw_hook(json.dumps(payload).encode())
+
+    def run_raw_hook(self, raw):
+        proc = subprocess.run([sys.executable, str(GUARD_PATH)], input=raw,
                               capture_output=True, timeout=30, env=self.env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout.decode("utf-8").strip()
+
+    def assert_deny(self, output):
+        self.assertTrue(output, "Пишущий вызов не должен завершаться пустым stdout")
+        out = json.loads(output)["hookSpecificOutput"]
+        self.assertEqual(out["hookEventName"], "PreToolUse")
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("[guard]"))
+
+    def test_string_patch_guardrail_denied(self):
+        text = "*** Begin Patch\n*** Update File: ops/hooks/guard.py\n@@\n+x\n*** End Patch"
+        for key in ("tool_input", "toolArgs"):
+            with self.subTest(key=key):
+                self.assert_deny(self.run_hook({"tool_name": "apply_patch", key: text}))
+                self.assertIsNotNone(guard.decide("apply_patch", text, policy=OFF))
+
+    def test_safe_string_patch_uses_existing_policy(self):
+        safe = "*** Begin Patch\n*** Add File: src/example.py\n+x = 1\n*** End Patch"
+        risky = safe.replace("x = 1", "risk.MAX_POSITION_PCT = 50")
+        for key in ("tool_input", "toolArgs"):
+            with self.subTest(key=key):
+                self.assertEqual(self.run_hook({"tool_name": "apply_patch", key: safe}), "")
+                self.assert_deny(self.run_hook({"tool_name": "apply_patch", key: risky}))
+
+    def test_string_input_is_not_json_decoded(self):
+        for key in ("tool_input", "toolArgs"):
+            with self.subTest(key=key):
+                self.assert_deny(self.run_hook({
+                    "tool_name": "Write", key: '{"file_path": "src/example.py", "content": "x"}'}))
+
+    def test_malformed_readonly_input_keeps_behavior(self):
+        for key in ("tool_input", "toolArgs"):
+            for value in (None, [], 42, {}, "not json"):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.run_hook({"tool_name": "Read", key: value}), "")
+
+    def test_malformed_writing_input_denied(self):
+        for key in ("tool_input", "toolArgs"):
+            for tool in ("Write", "apply_patch", "run_in_terminal"):
+                for value in (None, [], 42, {}, "not json", {"file_path": 42}, {"command": []}):
+                    with self.subTest(key=key, tool=tool, value=value):
+                        self.assert_deny(self.run_hook({"tool_name": tool, key: value}))
+        self.assert_deny(self.run_hook({"tool_name": "Write"}))
+        # Некорректное основное поле нельзя подменить безопасным резервным.
+        self.assert_deny(self.run_hook({"tool_name": "Write", "tool_input": [],
+                                      "toolArgs": {"file_path": "src/example.py", "content": "x"}}))
+
+    def test_malformed_envelope_with_writing_hints_denied(self):
+        for raw in (
+            b'{"tool_name": "apply_patch", "tool_input": ',
+            b'{"tool_name": "Write", "toolArgs": "broken',
+            b'{"tool_input": {"file_path": "src/example.py", "content": ',
+            b'{"tool_name": "Bash", "tool_input": {"command": ',
+            b'[{"tool_name": "Write", "tool_input": {}}]',
+            b'{"tool_name": 42, "tool_input": {"content": "x"}}',
+            b"{'tool_name': 'apply_patch', 'tool_input': 'broken'}",
+        ):
+            with self.subTest(raw=raw):
+                self.assert_deny(self.run_raw_hook(raw))
+
+    def test_malformed_fields_with_valid_path_denied(self):
+        for key in ("tool_input", "toolArgs"):
+            for value in (
+                {"file_path": "src/example.py", "content": []},
+                {"file_path": ["src/example.py"], "content": "x"},
+                {"file_path": "src/example.py", "new_string": 42},
+            ):
+                with self.subTest(key=key, value=value):
+                    self.assert_deny(self.run_hook({"tool_name": "Write", key: value}))
+
+    def test_dict_envelopes_keep_contract(self):
+        for key in ("tool_input", "toolArgs"):
+            with self.subTest(key=key):
+                self.assertEqual(self.run_hook({"tool_name": "Write", key: {
+                    "file_path": "src/example.py", "content": "x"}}), "")
+                self.assert_deny(self.run_hook({"tool_name": "Write", key: {
+                    "file_path": "ops/hooks/guard.py", "content": "x"}}))
+
+    def test_unknown_tool_with_invalid_writing_fields_denied(self):
+        for value in ({"content": "x"}, {"input": "not a patch"}, {"command": []}):
+            with self.subTest(value=value):
+                self.assert_deny(self.run_hook({"tool_name": "unknown", "tool_input": value}))
+
+    def test_internal_exception_denied_and_logged(self):
+        payload = {"tool_name": "apply_patch", "tool_input": {"input": "patch"}}
+        stdin = io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode()), encoding="utf-8")
+        stdout = io.StringIO()
+        with patch.object(guard.sys, "stdin", stdin), patch.object(guard.sys, "stdout", stdout), \
+                patch.object(guard, "decide", side_effect=RuntimeError("проверка сломалась")), \
+                patch.object(guard, "GUARD_LOG", Path(self.env["AGENT_GUARD_LOG"])):
+            self.assertEqual(guard.main(), 0)
+        self.assert_deny(stdout.getvalue())
+        entries = [json.loads(line) for line in Path(self.env["AGENT_GUARD_LOG"]).read_text(
+            encoding="utf-8").splitlines()]
+        self.assertTrue(any(entry["decision"] == "error" for entry in entries))
+
+    def test_log_unavailable_does_not_erase_deny(self):
+        payload = {"tool_name": "Write", "tool_input": None}
+        stdin = io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode()), encoding="utf-8")
+        stdout = io.StringIO()
+        with patch.object(guard.sys, "stdin", stdin), patch.object(guard.sys, "stdout", stdout), \
+                patch.object(guard.Path, "open", side_effect=OSError("журнал недоступен")):
+            self.assertEqual(guard.main(), 0)
+        self.assert_deny(stdout.getvalue())
 
     def test_deny_output(self):
         out = json.loads(self.run_hook({"hook_event_name": "PreToolUse", "tool_name": "run_in_terminal",

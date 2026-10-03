@@ -19,8 +19,8 @@ Codex, Gemini CLI и Muse Code вызывают guard через ops/hooks/guard
 их форматы (apply_patch в command, cmd/argv, вложенные вызовы, BeforeTool, пути WSL)
 к этому входу и отвечает в формате клиента (AGENT-GUARD-COMPAT).
 Выход — JSON с permissionDecision="deny" (понимают и VS Code, и Claude Code)
-или пустой вывод (разрешено). Сбой самого guard — пропуск с записью в лог:
-баг guard не должен останавливать всю работу агентов.
+или пустой вывод (разрешено). Строковый tool_input/toolArgs — текст input, не JSON.
+Некорректный пишущий вход и сбой проверки — deny с диагностикой в логе.
 """
 import json
 import os
@@ -54,6 +54,9 @@ RISK_LIMITS_UP_IS_RISKIER = {
 RISK_LIMITS_DOWN_IS_RISKIER = {"INST_BLOCK_HOURS", "SYS_PAUSE_HOURS"}
 
 WRITE_TOOL_HINTS = ("create", "edit", "replace", "insert", "write", "patch", "delete", "rename", "move")
+COMMAND_TOOL_HINTS = ("terminal", "powershell", "bash", "shell", "execute", "exec", "run_command")
+WRITE_FIELDS = {"command", "input", "content", "code", "text", "newstring", "new_string",
+                "newpath", "new_path", "oldpath", "old_path"}
 MUTATING_CMD = re.compile(
     r"(\bset-content\b|\badd-content\b|\bout-file\b|\bsed\s+-i|\brm\b|\bdel\b|\berase\b|"
     r"\bremove-item\b|\bri\b|\bmv\b|\bmove\b|\bmove-item\b|\bcp\b|\bcopy\b|\bcopy-item\b|"
@@ -355,21 +358,67 @@ def check_risk_limits(tool_input: Any, risk_path: Path) -> Optional[str]:
     return None
 
 
+def _writing_name(tool_name: str) -> bool:
+    return any(h in tool_name.lower() for h in WRITE_TOOL_HINTS + COMMAND_TOOL_HINTS)
+
+
+def _writing_fields(node: Any) -> bool:
+    """Неизвестное имя не делает поля потенциальной записи безопасными."""
+    if isinstance(node, dict):
+        return any(str(k).lower() in WRITE_FIELDS or _writing_fields(v) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_writing_fields(v) for v in node)
+    return isinstance(node, str) and "*** Begin Patch" in node
+
+
+def _raw_writing_hint(raw: str) -> bool:
+    """Для сломанного JSON: узнаём имя/поля, но не пытаемся исполнять или чинить вход."""
+    names = re.findall(r'["\']tool_name["\']\s*:\s*["\']([^"\']*)', raw, re.I)
+    fields = re.findall(r'["\']([^"\']+)["\']\s*:', raw)
+    return (any(_writing_name(name) for name in names)
+            or any(field.lower() in WRITE_FIELDS for field in fields)
+            or "*** Begin Patch" in raw)
+
+
 def decide(tool_name: str, tool_input: Any, policy: Optional[dict] = None,
            okx_profiles=None, root: Path = ROOT) -> Optional[str]:
     """Причина запрета или None (разрешено)."""
-    policy = load_live_policy() if policy is None else policy
-    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    potential_write = _writing_name(tool_name) or _writing_fields(tool_input)
+    if isinstance(tool_input, str):
+        tool_input = {"input": tool_input}
+    if not isinstance(tool_input, dict):
+        return "Некорректный вход потенциально пишущего инструмента." if potential_write else None
 
+    paths = _collect_paths(tool_input)
     command = tool_input.get("command")
+    if potential_write:
+        if "command" in tool_input and (not isinstance(command, str) or not command.strip()):
+            return "Некорректное поле command: команда не проверена."
+        for cfield in ("content", "code", "text", "newstring", "new_string"):
+            if cfield in tool_input and not isinstance(tool_input[cfield], str):
+                return f"Некорректное поле {cfield}: содержимое должно быть строкой."
+        for pfield in ("file_path", "filepath", "path", "file", "filename", "source_path", "target_file", "notebook_path"):
+            if pfield in tool_input and not isinstance(tool_input[pfield], str):
+                return f"Некорректное поле {pfield}: путь должен быть строкой."
+        patch = tool_input.get("input")
+        if "input" in tool_input and (
+                not isinstance(patch, str) or not patch.startswith("*** Begin Patch\n")
+                or not patch.rstrip().endswith("*** End Patch") or not paths):
+            return "Некорректный patch/input: запись не проверена."
+        has_code = isinstance(tool_input.get("code"), str) and bool(tool_input.get("code").strip())
+        if not (isinstance(command, str) and command.strip()) and not any(p.strip() for p in paths) and not has_code:
+            return "Нет проверяемой команды или пути потенциальной записи."
+
+    policy = load_live_policy() if policy is None else policy
+
     if isinstance(command, str) and command.strip():
         profiles = okx_demo_profiles() if okx_profiles is None else okx_profiles
         reason = check_command(command, policy, profiles)
         if reason:
             return reason
 
-    is_write = any(h in tool_name.lower() for h in WRITE_TOOL_HINTS)
-    for raw in _collect_paths(tool_input):
+    is_write = potential_write
+    for raw in paths:
         rel = _norm_path(raw)
         if _is_env_file(rel):
             return "Файл .env с ключами агентам не читается и не меняется."
@@ -400,25 +449,47 @@ def _redact(text: str) -> str:
 
 
 def main() -> int:
+    tool_name, tool_input = "", {}
+    error = None
     try:
-        payload = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")
-        tool_name = str(payload.get("tool_name", ""))
-        tool_input = payload.get("tool_input") or payload.get("toolArgs") or {}
-        if isinstance(tool_input, str):
-            tool_input = json.loads(tool_input)
-        reason = decide(tool_name, tool_input)
-    except Exception as exc:  # fail-open: сломанный guard не должен блокировать работу
-        _log({"ts": datetime.now(timezone.utc).isoformat(), "decision": "error", "error": repr(exc)})
-        return 0
+        raw = sys.stdin.buffer.read().decode("utf-8-sig")
+        try:
+            payload = json.loads(raw or "{}")
+        except json.JSONDecodeError as exc:
+            # Только нераспознанный непишущий мусор сохраняет прежний пустой stdout.
+            error = type(exc).__name__
+            reason = "Непарсируемый вход потенциальной записи." if _raw_writing_hint(raw) else None
+        else:
+            if not isinstance(payload, dict):
+                error = "Некорректный envelope"
+                reason = "Некорректный envelope потенциальной записи." if _writing_fields(payload) or \
+                    _raw_writing_hint(raw) else None
+            else:
+                name = payload.get("tool_name", "")
+                if not isinstance(name, str):
+                    raise ValueError("Некорректное имя инструмента")
+                tool_name = name
+                # Присутствующее, но пустое/сломанное поле не подменяем резервным.
+                tool_input = payload.get("tool_input") if "tool_input" in payload else payload.get("toolArgs")
+                reason = decide(tool_name, tool_input)
+    except Exception as exc:
+        # Аварийный путь всегда deny; сообщение исключения может содержать секретный вход.
+        error = type(exc).__name__
+        reason = "Сбой проверки guard: действие запрещено до корректной проверки."
 
     if reason:
-        snippet = tool_input.get("command") if isinstance(tool_input, dict) else None
-        _log({"ts": datetime.now(timezone.utc).isoformat(), "decision": "deny", "tool": tool_name,
-              "reason": reason, "snippet": _redact(str(snippet or _collect_paths(tool_input)))})
         out = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                       "permissionDecisionReason": f"[guard] {reason}"}}
         # ASCII-JSON: хост читает stdout как UTF-8, а Python на Windows пишет в cp1251
+        # Ответ выдаём до диагностики: проблема журнала не превращает deny в пустой stdout.
         sys.stdout.write(json.dumps(out))
+    if error:
+        _log({"ts": datetime.now(timezone.utc).isoformat(), "decision": "error", "error": error})
+    if reason:
+        normalized = {"input": tool_input} if isinstance(tool_input, str) else tool_input
+        snippet = normalized.get("command") if isinstance(normalized, dict) else None
+        _log({"ts": datetime.now(timezone.utc).isoformat(), "decision": "deny", "tool": tool_name,
+              "reason": reason, "snippet": _redact(str(snippet or _collect_paths(normalized)))})
     return 0
 
 

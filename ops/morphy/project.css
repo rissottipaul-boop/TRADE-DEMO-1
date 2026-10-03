@@ -3,6 +3,7 @@
 @import './project/threshold-bar.css';
 @import './project/spark.css';
 @import './project/skeleton.css';
+@import './project/assistant.css';
 
 /* ── Базовая разметка и контейнер ── */
 .pj-root {
@@ -440,7 +441,9 @@
 
 .pj-chart {
   height: 250px;
+  min-height: 250px;
   width: 100%;
+  min-width: 0;
 }
 
 /* ── Панель безопасности и лимитов ── */
@@ -1074,6 +1077,120 @@
   font-size: var(--pj-fs-small);
 }
 
+/* ── Авторизация и системные уведомления ── */
+.pj-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  background: var(--pj-surface-2);
+  border: 1px solid var(--pj-line-strong);
+  border-radius: var(--pj-r-lg);
+  padding: 20px 24px;
+  margin-bottom: 24px;
+  color: var(--pj-text);
+}
+
+.pj-notice svg {
+  color: var(--pj-accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.pj-notice strong {
+  display: block;
+  font-size: var(--pj-fs-base);
+  font-weight: var(--pj-fw-semibold);
+  margin-bottom: 6px;
+}
+
+.pj-notice p {
+  color: var(--pj-text-2);
+  font-size: var(--pj-fs-small);
+  line-height: var(--pj-lh-base);
+  margin-bottom: 14px;
+}
+
+.pj-login-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.pj-login-input {
+  flex: 1;
+  min-width: 240px;
+  max-width: 380px;
+  background: var(--pj-surface-inset);
+  border: 1px solid var(--pj-line-strong);
+  border-radius: var(--pj-r-md);
+  padding: 9px 14px;
+  color: var(--pj-text);
+  font-size: var(--pj-fs-small);
+}
+
+.pj-login-input:focus {
+  outline: var(--pj-focus-width) solid var(--pj-focus);
+  border-color: var(--pj-accent);
+}
+
+.pj-login-alt-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--pj-accent);
+  font-size: var(--pj-fs-small);
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: var(--pj-r-sm);
+  transition: color var(--pj-dur-fast) var(--pj-ease);
+}
+
+.pj-login-alt-link:hover {
+  color: var(--pj-accent-strong);
+  text-decoration: underline;
+}
+
+.pj-login-error {
+  margin-top: 10px;
+  color: var(--pj-crit);
+  font-size: var(--pj-fs-small);
+  font-weight: var(--pj-fw-medium);
+}
+
+/* ── Навигация и пустые состояния задач ── */
+.pj-task-empty-notice {
+  padding: 24px 16px;
+  text-align: center;
+}
+
+.pj-task-empty-notice p {
+  color: var(--pj-text-muted);
+  font-size: var(--pj-fs-small);
+  margin-bottom: 12px;
+}
+
+.pj-link-btn {
+  background: transparent;
+  border: none;
+  color: var(--pj-accent);
+  font-size: var(--pj-fs-small);
+  font-weight: var(--pj-fw-medium);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--pj-r-md);
+  transition: background var(--pj-dur-fast) var(--pj-ease), color var(--pj-dur-fast) var(--pj-ease);
+}
+
+.pj-link-btn:hover {
+  background: var(--pj-accent-bg);
+  color: var(--pj-accent-strong);
+}
+
 /* ── Адаптив под экраны ── */
 @media (max-width: 1200px) {
   .pj-metrics {
@@ -1119,5 +1236,6 @@
   }
   .pj-chart {
     height: 200px;
+    min-height: 200px;
   }
 }

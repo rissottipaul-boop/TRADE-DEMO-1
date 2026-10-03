@@ -6,6 +6,7 @@ autopilot, доску или решения человека. Запись — �
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from collections import Counter
 from datetime import datetime, timezone
 import hashlib
@@ -16,8 +17,10 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from src import native_sessions
@@ -34,7 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "ops" / "control-panel"
 # Домашний каталог с состоянием CLI (патчится в тестах); ключи оттуда не читаются.
 NATIVE_HOME = Path.home()
-MAX_BODY = 4096
+_START_LOCK = threading.RLock()
+_RUN_LOCK = threading.RLock()
+_INFLIGHT_STARTS: set[str] = set()
+MAX_BODY = 24 * 1024
 MAX_JSON = 256 * 1024
 MAX_LOG_BYTES = 16 * 1024
 ALLOWED_ACTIONS = {"engine.start", "engine.stop", "delegation.pause", "delegation.stop"}
@@ -288,13 +294,16 @@ def _git_snapshot(root: Path) -> dict:
 
 
 def _redact_handoff(text: str) -> tuple[str, int]:
-    patterns = [r"(?i)(\b(?:api[_-]?key|token|secret|password)\b\s*[:=]\s*)[^\s|;,]+",
+    patterns = [r"(?i)(\b[A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|password|passphrase|authorization|cookie)[A-Za-z0-9_.-]*\s*[:=]\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s|;,]+)",
                 r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]+",
                 r"(?i)\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,})\b"]
     count = 0
     for pattern in patterns:
         text, found = re.subn(pattern, lambda match: (match.group(1) if match.lastindex else "") + "[СКРЫТО]", text)
         count += found
+    text, found = re.subn(r"-----BEGIN (?:[A-Z ]*PRIVATE KEY|OPENSSH PRIVATE KEY)-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
+                         "[СКРЫТО]", text)
+    count += found
     return text, count
 
 
@@ -402,14 +411,25 @@ def _runs_dir(root: Path) -> Path:
     return base
 
 
-def _redact_data(item):
+def _redact_data(item, _depth: int = 0):
+    from src.ai_observability import redact
+    if _depth >= 32:
+        return "[DEPTH LIMIT]"
     if isinstance(item, str):
-        text, _ = _redact_handoff(item)
-        return text
+        return redact(item, max_text=1048576).replace("[REDACTED]", "[СКРЫТО]")
     if isinstance(item, dict):
-        return {k: _redact_data(v) for k, v in item.items()}
+        # Фильтр ключей общий, но длинные списки событий/задач не обрезаются
+        # лимитом safe_projection: их пагинация и границы заданы самим API.
+        result = {}
+        for key, value in item.items():
+            filtered = redact({key: None}, max_text=1048576)
+            if not filtered:
+                continue
+            clean_key, marker = next(iter(filtered.items()))
+            result[clean_key] = "[СКРЫТО]" if marker == "[REDACTED]" else _redact_data(value, _depth + 1)
+        return result
     if isinstance(item, list):
-        return [_redact_data(v) for v in item]
+        return [_redact_data(v, _depth + 1) for v in item]
     return item
 
 
@@ -418,7 +438,10 @@ def _save_run(root: Path, run: dict) -> None:
     clean = _redact_data(run)
     temporary = path.with_name(path.name + "." + secrets.token_hex(4) + ".tmp")
     try:
-        temporary.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(clean, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -454,7 +477,9 @@ def _ingest_rotation_events(root: Path, run: dict) -> bool:
     "exit-code-only": код выхода сам по себе не подтверждает критерий доски.
     """
     log_ref = run.get("rotation_log")
-    log_path = Path(log_ref) if isinstance(log_ref, str) and log_ref else root / "logs" / "agent-rotate.log"
+    log_path = Path(log_ref) if isinstance(log_ref, str) and log_ref else Path("logs/agent-rotate.log")
+    if not log_path.is_absolute():
+        log_path = root / log_path
     seen = {(event.get("data") or {}).get("source_ts")
             for event in run.get("events", []) if isinstance(event, dict)
             and isinstance(event.get("data"), dict)}
@@ -578,6 +603,41 @@ def _heartbeat_run_lease(root: Path, run: dict) -> bool:
 
 
 def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
+    # Параллельный polling не должен перетирать курсор или дублировать события.
+    with _RUN_LOCK:
+        return _get_run_locked(root, run_id, check_alive)
+
+
+def _ingest_run_report(root: Path, run: dict) -> bool:
+    """Читает отчёт агента из подтверждённого checkout; reported не означает приёмку."""
+    from src.agent_assistant import _review_checkout
+    from src.agent_run_report import load_report
+    try:
+        checkout, _ = _review_checkout(root, run)
+        envelope = load_report(checkout, run["id"], run["task_id"])
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        problem = "Источник отчёта не подтверждён; требуется сверка привязки, схемы и worktree"
+        if run.get("result_report_error") == problem:
+            return False
+        run["result_report_error"] = problem
+        return True
+    if envelope is None:
+        return False
+    digest = hashlib.sha256(json.dumps(envelope, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    if run.get("result_report_sha256") == digest:
+        return False
+    run["result"] = envelope["result"]
+    run["result_report_sha256"] = digest
+    run["result_report_provenance"] = {
+        "source": envelope["provenance"], "checkout": str(checkout),
+        "reported_at": envelope["reported_at"], "quality": "reported", "acceptance_verified": False,
+    }
+    run.pop("result_report_error", None)
+    _append_event(run, "run.report", envelope["reported_at"], {"source": envelope["provenance"], "quality": "reported"})
+    return True
+
+
+def _get_run_locked(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
     if not run_id or not re.fullmatch(r"run_[A-Za-z0-9_-]{1,80}", run_id):
         return None
     path = _runs_dir(root) / f"{run_id}.json"
@@ -587,9 +647,14 @@ def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
     if not isinstance(run, dict) or run.get("id") != run_id:
         return None
     changed = False
+    if check_alive and run.get("status") == "starting" and run_id not in _INFLIGHT_STARTS:
+        run["status"] = "unknown"
+        _append_event(run, "run.unconfirmed", None,
+                      {"reason": "Найдена незавершённая запись запуска; перед повтором нужна сверка"})
+        changed = True
     if check_alive and run.get("status") in ("running", "unknown"):
         # Recovery: журнал лаунчера может подтвердить итог и после рестарта панели.
-        changed = _ingest_rotation_events(root, run)
+        changed = _ingest_rotation_events(root, run) or changed
         # Нативный журнал сессии дополняет события и стоимость с provenance.
         changed = _ingest_native_events(root, run) or changed
     if check_alive and run.get("status") == "running" and run.get("pid"):
@@ -608,6 +673,7 @@ def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
             changed = True
         else:
             changed = _heartbeat_run_lease(root, run) or changed
+    changed = _ingest_run_report(root, run) or changed
     if changed:
         _save_run(root, run)
     return run
@@ -651,8 +717,10 @@ def _observed_runs(root: Path, limit: int = 50) -> list[dict]:
 
 
 def _run_events(root: Path, run_id: str, after: int = 0, limit: int = 100) -> dict:
-    if after < 0 or after > 1_000_000_000:
+    if type(after) is not int or after < 0 or after > 1_000_000_000:
         raise ValueError("Неверный курсор события")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Неверный предел событий")
     run = _get_run(root, run_id, check_alive=True)
     if not run:
         raise ValueError("Локальный запуск не найден")
@@ -678,12 +746,53 @@ def _spawn_agent_process(root: Path, agent: str, role: str, task_id: str, model:
         command.extend(["-Model", model])
     if run_id:
         command.extend(["-RunId", run_id])
+        report_instruction = (
+            f"Работай только над задачей {task_id}. Выполни SYNC, CLAIM, DO, VERIFY и RECORD по AGENTS.md. "
+            "До завершения сохрани JSON-отчёт: summary, changed_files, checks "
+            "(command, exit_code, status passed/failed/unknown/not-run, artifact_ref при наличии), "
+            "external_actions (id, kind, status; незавершённые — unknown), next_step. "
+            "Не включай секреты; не объявляй непроверенные действия завершёнными. "
+            f"Передай JSON через stdin команде .venv/Scripts/python.exe -m src.agent_run_report "
+            f"--run-id {run_id} --task-id {task_id} либо используй --input относительный-report.json. "
+            "Отчёт не заменяет доску и проверку критерия."
+        )
+        command.extend(["-Prompt", report_instruction])
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     proc = subprocess.Popen(command, cwd=base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
     return proc.pid
 
 
+@contextmanager
+def _start_reservation(root: Path):
+    """Межпоточный и межпроцессный запрет второго запуска до записи результата.
+
+    Оставшийся после аварии файл не снимается по таймеру: его исход требуется
+    сверить, поскольку процесс мог успеть стартовать до потери ответа.
+    """
+    with _START_LOCK:
+        path = _runs_dir(root) / ".start.lock"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise ValueError("Запуск уже выполняется или его исход неизвестен; нужна сверка reservation") from exc
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "created_at": datetime.now(timezone.utc).isoformat()}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            yield
+        finally:
+            path.unlink(missing_ok=True)
+
+
 def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
+               idempotency_key: str | None = None, model: str | None = None,
+               workspace: str = "checkout") -> dict:
+    with _start_reservation(root):
+        return _start_run_reserved(root, task_id, role, agent, idempotency_key, model, workspace)
+
+
+def _start_run_reserved(root: Path, task_id: str, role: str, agent: str = "auto",
                idempotency_key: str | None = None, model: str | None = None,
                workspace: str = "checkout") -> dict:
     if idempotency_key is not None and (not isinstance(idempotency_key, str) or
@@ -691,6 +800,20 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
         raise ValueError("Неверный idempotency_key")
     if workspace not in ("checkout", "worktree"):
         raise ValueError("Неверный workspace: допустимы checkout и worktree")
+    if model is not None and (not isinstance(model, str) or
+                              not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,99}", model)):
+        raise ValueError("Неверная модель")
+    requested_runtime = agent
+    # Повтор уже принятого intent не зависит от нового статуса карточки/CLI.
+    all_runs = _list_runs(root, limit=None)
+    if idempotency_key:
+        for existing in all_runs:
+            if existing.get("idempotency_key") == idempotency_key:
+                if (existing.get("task_id"), existing.get("role"),
+                    existing.get("requested_runtime", existing.get("runtime")),
+                    existing.get("model"), existing.get("workspace", "checkout")) != (task_id, role, agent, model, workspace):
+                    raise ValueError("idempotency_key уже использован для другого запуска")
+                return existing
     task = _task_detail(root, task_id)
     if not task.get("eligible"):
         raise ValueError(f"Задача {task_id} не готова к запуску")
@@ -710,18 +833,9 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
     if "start" not in caps:
         raise ValueError(f"Рантайм {agent} не поддерживает операцию start")
 
-    # 1. Проверка по idempotency_key
-    all_runs = _list_runs(root, limit=None)
-    if idempotency_key:
-        for existing in all_runs:
-            if existing.get("idempotency_key") == idempotency_key:
-                if (existing.get("task_id"), existing.get("role"), existing.get("runtime")) != (task_id, role, agent):
-                    raise ValueError("idempotency_key уже использован для другого запуска")
-                return existing
-
-    # 2. Проверка активного запуска по task_id
+    # Проверка активного запуска по task_id, включая записи вне UI-лимита.
     for existing in all_runs:
-        if existing.get("task_id") == task_id and existing.get("status") == "running":
+        if existing.get("task_id") == task_id and existing.get("status") in ("running", "starting"):
             return existing
         if existing.get("task_id") == task_id and existing.get("status") == "unknown":
             raise ValueError("Итог прежнего запуска неизвестен; нужна сверка перед повтором")
@@ -732,7 +846,7 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
         raise ValueError("Запуск недоступен: " + str(plan.get("reason") or "guard/CLI не проверены"))
     now = datetime.now(timezone.utc).isoformat()
     rand_suffix = secrets.token_hex(4)
-    run_id = f"run_{task_id}_{int(datetime.now(timezone.utc).timestamp())}_{rand_suffix}"
+    run_id = f"run_{task_id[:48]}_{int(datetime.now(timezone.utc).timestamp())}_{rand_suffix}"
     lease = None
     workdir = None
     if workspace == "worktree":
@@ -742,16 +856,6 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
         except LeaseError as exc:
             raise ValueError(f"Worktree lease недоступен: {exc}") from exc
         workdir = Path(lease["worktree"])
-    try:
-        pid = _spawn_agent_process(root, agent, role, task_id, model=model,
-                                   run_id=run_id, workdir=workdir)
-    except Exception:
-        if lease:
-            try:
-                release_lease(root, task_id, run_id, state="unknown")
-            except (LeaseError, ValueError):
-                pass
-        raise
     rotation_log = ((workdir / "logs" / "agent-rotate.log").as_posix()
                     if workdir else "logs/agent-rotate.log")
     run = {
@@ -759,9 +863,10 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
         "task_id": task_id,
         "role": role,
         "runtime": agent,
+        "requested_runtime": requested_runtime,
         "model": model,
-        "status": "running",
-        "pid": pid,
+        "status": "starting",
+        "pid": None,
         "idempotency_key": idempotency_key,
         "started_at": now,
         "finished_at": None,
@@ -775,8 +880,8 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
             {
                 "cursor": 1,
                 "ts": now,
-                "type": "run.started",
-                "data": {"task_id": task_id, "role": role, "runtime": agent, "pid": pid,
+                "type": "run.prepared",
+                "data": {"task_id": task_id, "role": role, "runtime": agent,
                          "workspace": workspace,
                          "worktree": lease["worktree"] if lease else None},
             }
@@ -787,7 +892,28 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
                                " содержит только события start/finish"},
         "provenance": f"data/runs/{run_id}.json",
     }
-    _save_run(root, run)
+    # Сначала durable intent: даже при потере ответа после Popen повтор закрыт.
+    _INFLIGHT_STARTS.add(run_id)
+    try:
+        _save_run(root, run)
+        pid = _spawn_agent_process(root, agent, role, task_id, model=model,
+                                   run_id=run_id, workdir=workdir)
+        run.update(status="running", pid=pid)
+        _append_event(run, "run.started", None, {"pid": pid, "runtime": agent,
+                                                  "workspace": workspace})
+        _save_run(root, run)
+    except Exception:
+        run["status"] = "unknown"
+        _append_event(run, "run.unconfirmed", None,
+                      {"reason": "Ответ операции запуска не подтверждён; перед повтором нужна сверка"})
+        try:
+            _save_run(root, run)
+        except OSError:
+            # Ранее сохранённый intent остаётся starting и при чтении станет unknown.
+            pass
+        raise
+    finally:
+        _INFLIGHT_STARTS.discard(run_id)
     return run
 
 
@@ -819,6 +945,136 @@ def _steer_run(root: Path, run_id: str, text: str) -> dict:
                           "подтверждённый протокол сессии; инструкция не сохранялась",
                 "run": run}
     raise RuntimeError("Подтверждённый протокол steer не подключён")
+
+
+def _run_context(root: Path, run_id: str) -> dict:
+    """Восстановленный пакет для SYNC; чтение контекста не продолжает сессию."""
+    from src.agent_assistant import build_handoff
+    run = _get_run(root, run_id)
+    if not run:
+        raise ValueError("Локальный запуск не найден")
+    handoff = build_handoff(root, run["task_id"], run=run, run_id=run_id)
+    return _redact_data({"run_id": run_id, "status": run.get("status"),
+                         "kind": "recovered-handoff", "session_resumed": False,
+                         "native_session_id": run["native"].get("session_id") if isinstance(run.get("native"), dict) else None,
+                         "handoff": handoff,
+                         "markdown": handoff["markdown"],
+                         "project_context_markdown": _handoff(root, run["task_id"])["markdown"],
+                         "detail": "Пакет сохраняет цель и доказательства; новый исполнитель делает SYNC и CLAIM"})
+
+
+def _run_result(root: Path, run_id: str) -> dict:
+    from src.agent_assistant import build_handoff
+    run = _get_run(root, run_id)
+    if not run:
+        raise ValueError("Локальный запуск не найден")
+    handoff = build_handoff(root, run["task_id"], run=run, run_id=run_id)
+    result = run.get("result") if isinstance(run.get("result"), dict) else {}
+    summary = result.get("summary")
+    summary_quality = "reported"
+    if not isinstance(summary, str) or not summary.strip():
+        summary_quality = "lifecycle-only"
+        status = run.get("status")
+        summary = (f"Процесс завершён: код {run.get('exit_code')}. Выполнение критерия задачи требует проверки."
+                   if status in ("completed", "failed") else
+                   "Исход запуска неизвестен; перед повтором требуется сверка."
+                   if status == "unknown" else f"Состояние запуска: {status}. Итоговый отчёт не получен.")
+    return _redact_data({"run_id": run_id, "task_id": run.get("task_id"),
+                         "status": run.get("status"), "summary": summary[:2000],
+                         "summary_quality": summary_quality,
+                         "result_quality": run.get("result_quality", "unverified"),
+                         "acceptance_verified": False,
+                         "changed_files": handoff.get("changed_files", []),
+                         "checks": handoff.get("checks", []),
+                         "external_actions": handoff.get("external_actions", []),
+                         "missing_evidence": handoff.get("missing_evidence", []),
+                         "next_step": handoff.get("next_step"),
+                         "provenance": handoff.get("provenance"),
+                         "report_source": run.get("result_report_provenance"),
+                         "report_warning": run.get("result_report_error"),
+                         "continuation": {"resume_supported": "resume" in runtime_capabilities(root).get(run.get("runtime"), []),
+                                          "context_url": "/api/run/context?id=" + run_id,
+                                          "kind": "recovered-handoff"}})
+
+
+def _resume_run(root: Path, run_id: str) -> dict:
+    run = _get_run(root, run_id)
+    if not run:
+        raise ValueError("Локальный запуск не найден")
+    if "resume" not in runtime_capabilities(root).get(run.get("runtime"), []):
+        return {"ok": False, "error": "unsupported", "run_id": run_id,
+                "detail": "Адаптер не подтвердил протокол resume; можно восстановить пакет передачи без запуска сессии",
+                "context_url": "/api/run/context?id=" + run_id,
+                "session_resumed": False}
+    raise RuntimeError("Подтверждённый протокол resume не подключён")
+
+
+def _assistant_tool(root: Path, name: str, arguments: dict) -> dict:
+    """Серверная граница AI: схема проверяется до любого чтения/инструмента."""
+    from src import agent_assistant, ai_evals, ai_observability
+    started = time.monotonic()
+    args = {}
+    validated = False
+    try:
+        args = ai_observability.validate_tool_call(name, arguments)
+        validated = True
+        if name == "panel.state":
+            result = state(root)
+        elif name in ("board.task", "task.read"):
+            result = _task_detail(root, args["task_id"])
+        elif name == "runs.list":
+            result = {"runs": _observed_runs(root, args.get("limit", 50))}
+        elif name == "run.get":
+            run = _get_run(root, args["run_id"])
+            if not run:
+                raise ValueError("Локальный запуск не найден")
+            # Ассистент не получает произвольные внутренние поля записи.
+            result = {key: run.get(key) for key in ("id", "task_id", "role", "runtime", "model",
+                      "status", "started_at", "finished_at", "exit_code", "cost", "tokens", "provenance")}
+        elif name == "run.events":
+            result = _run_events(root, args["run_id"], args.get("after", 0), args.get("limit", 100))
+        elif name == "run.result":
+            result = _run_result(root, args["run_id"])
+        elif name == "ai.usage":
+            result = ai_observability.usage_summary(root)
+        elif name == "ai.evals":
+            result = ai_evals.run_suite()
+        elif name == "assistant.draft":
+            result = agent_assistant.task_draft(args["description"])
+        elif name == "assistant.role":
+            result = agent_assistant.recommend_role(args["description"])
+        elif name in ("assistant.handoff", "task.handoff"):
+            run = _get_run(root, args["run_id"]) if args.get("run_id") else None
+            if args.get("run_id") and (not run or run.get("task_id") != args["task_id"]):
+                raise ValueError("Запуск не найден или относится к другой задаче")
+            result = agent_assistant.build_handoff(root, args["task_id"], run=run, run_id=args.get("run_id"))
+        elif name in ("assistant.review", "task.review", "diff.review"):
+            if args.get("run_id"):
+                run = _get_run(root, args["run_id"])
+                if not run or run.get("task_id") != args["task_id"]:
+                    raise ValueError("Запуск не найден или относится к другой задаче")
+            result = agent_assistant.review_diff(root, args["task_id"], run_id=args.get("run_id"))
+        elif name == "assistant.specialist":
+            result = agent_assistant.call_specialist(root, args["role"], args["tool"], args["arguments"])
+        elif name == "sources.search":
+            result = agent_assistant.call_specialist(root, "crypto-insight-hunter", name, args)
+        else:
+            raise ValueError("Инструмент не подключён")
+        result = _redact_data(result)
+    except Exception as exc:
+        ai_observability.record_action(root, request="local-panel", tool=name if validated else "tool.rejected", arguments=args if validated else {},
+                                      result=None, duration_ms=(time.monotonic() - started) * 1000,
+                                      outcome="failed" if validated else "rejected", error=type(exc).__name__ if validated else "tool_validation")
+        raise
+    ai_observability.record_action(root, request="local-panel", tool=name, arguments=args,
+                                  result=result, duration_ms=(time.monotonic() - started) * 1000,
+                                  outcome="completed", run_id=args.get("run_id"))
+    return result
+
+
+def _strict_payload(payload: dict, required: set[str], optional: set[str] = frozenset()) -> None:
+    if not required <= payload.keys() or payload.keys() - required - optional:
+        raise ValueError("Неверные поля запроса")
 
 
 def state(root: Path = ROOT) -> dict:
@@ -942,7 +1198,15 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, code: int, payload: dict):
-        self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        self._send(code, json.dumps(_redact_data(payload), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _ai_response(self, name: str, arguments: dict):
+        try:
+            return self._json(200, _assistant_tool(self.server.root, name, arguments))
+        except ValueError as exc:
+            return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
+        except (OSError, RuntimeError, sqlite3.Error, subprocess.TimeoutExpired):
+            return self._json(503, {"error": "Локальный помощник временно недоступен; проверьте состояние и повторите чтение"})
 
     def do_GET(self):
         if not self._host_ok():
@@ -963,6 +1227,19 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._send(200, path.read_bytes(), kind + "; charset=utf-8")
         if not self._authorized():
             return self._json(403, {"error": "Неверный токен"})
+        if not self._origin_ok():
+            return self._json(403, {"error": "Недопустимый Origin"})
+        if parsed.path == "/api/ai/observability":
+            return self._ai_response("ai.usage", {})
+        if parsed.path == "/api/ai/evals":
+            return self._ai_response("ai.evals", {})
+        if parsed.path == "/api/run/result":
+            return self._ai_response("run.result", {"run_id": parse_qs(parsed.query).get("id", [""])[0]})
+        if parsed.path == "/api/run/context":
+            try:
+                return self._json(200, _run_context(self.server.root, parse_qs(parsed.query).get("id", [""])[0]))
+            except (OSError, ValueError) as exc:
+                return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
         if parsed.path == "/api/state":
             return self._json(200, state(self.server.root))
         if parsed.path == "/api/task":
@@ -983,9 +1260,12 @@ class PanelHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 run_id = query.get("id", [""])[0]
                 cursor = query.get("after", ["0"])[0]
+                limit = query.get("limit", ["100"])[0]
                 if not re.fullmatch(r"[0-9]{1,10}", cursor):
                     raise ValueError("Неверный курсор события")
-                return self._json(200, _run_events(self.server.root, run_id, int(cursor)))
+                if not re.fullmatch(r"[0-9]{1,3}", limit):
+                    raise ValueError("Неверный предел событий")
+                return self._json(200, _run_events(self.server.root, run_id, int(cursor), int(limit)))
             except ValueError as exc:
                 return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
         if parsed.path == "/api/run":
@@ -999,8 +1279,14 @@ class PanelHandler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": str(exc)})
         if parsed.path == "/api/handoff":
             try:
-                task_id = parse_qs(parsed.query).get("id", [""])[0]
-                return self._json(200, _handoff(self.server.root, task_id))
+                query = parse_qs(parsed.query)
+                task_id = query.get("id", query.get("task_id", [""]))[0]
+                result = _handoff(self.server.root, task_id)
+                args = {"task_id": task_id}
+                if query.get("run_id"):
+                    args["run_id"] = query["run_id"][0]
+                result["structured"] = _assistant_tool(self.server.root, "assistant.handoff", args)
+                return self._json(200, result)
             except (OSError, ValueError) as exc:
                 return self._json(400, {"error": str(exc)})
         return self._json(404, {"error": "Не найдено"})
@@ -1010,7 +1296,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._json(403, {"error": "Доступ запрещён"})
         parsed = urlsplit(self.path)
         if parsed.path not in ("/api/action", "/api/agent/plan", "/api/runs",
-                               "/api/run/cancel", "/api/runs/cancel", "/api/run/steer"):
+                               "/api/run/cancel", "/api/runs/cancel", "/api/run/steer",
+                               "/api/run/resume", "/api/assistant/draft", "/api/assistant/review",
+                               "/api/assistant/tool"):
             return self._json(404, {"error": "Не найдено"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -1019,6 +1307,27 @@ class PanelHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 return self._json(400, {"error": "Неверный запрос"})
+            schemas = {
+                "/api/action": ({"action"}, set()),
+                "/api/agent/plan": ({"task_id", "role", "agent"}, set()),
+                "/api/runs": ({"task_id", "role"}, {"agent", "idempotency_key", "model", "workspace"}),
+                "/api/run/cancel": ({"run_id"}, set()),
+                "/api/runs/cancel": ({"run_id"}, set()),
+                "/api/run/steer": ({"run_id", "text"}, set()),
+                "/api/run/resume": ({"run_id"}, set()),
+                "/api/assistant/draft": ({"description"}, set()),
+                "/api/assistant/review": ({"task_id"}, {"run_id"}),
+                "/api/assistant/tool": ({"name", "arguments"}, set()),
+            }
+            _strict_payload(payload, *schemas[parsed.path])
+            if parsed.path == "/api/assistant/draft":
+                return self._ai_response("assistant.draft", payload)
+            if parsed.path == "/api/assistant/review":
+                return self._ai_response("assistant.review", payload)
+            if parsed.path == "/api/assistant/tool":
+                if not isinstance(payload["name"], str) or not isinstance(payload["arguments"], dict):
+                    raise ValueError("Неверный вызов инструмента")
+                return self._ai_response(payload["name"], payload["arguments"])
             if parsed.path == "/api/agent/plan":
                 try:
                     if not all(isinstance(payload.get(key), str) for key in ("task_id", "role", "agent")):
@@ -1036,13 +1345,23 @@ class PanelHandler(BaseHTTPRequestHandler):
                     agent = payload.get("agent", "auto")
                     idempotency_key = payload.get("idempotency_key")
                     model = payload.get("model")
-                    workspace = payload.get("workspace", "checkout")
+                    workspace = payload.get("workspace", "worktree" if role == "insight-executor" else "checkout")
                     if not isinstance(task_id, str) or not isinstance(role, str) or not isinstance(agent, str) \
                             or not isinstance(workspace, str):
                         return self._json(400, {"error": "Неверные параметры запуска"})
+                    if idempotency_key is not None and (not isinstance(idempotency_key, str) or
+                            not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", idempotency_key)):
+                        return self._json(400, {"error": "Неверный idempotency_key"})
+                    if model is not None and (not isinstance(model, str) or
+                            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,99}", model)):
+                        return self._json(400, {"error": "Неверная модель"})
+                    if role == "insight-executor" and workspace != "worktree":
+                        return self._json(400, {"error": "Кодовая задача требует отдельный worktree; запись агента в основной checkout не разрешена"})
                     run = _start_run(self.server.root, task_id, role, agent,
                                      idempotency_key=idempotency_key, model=model,
                                      workspace=workspace)
+                    if run.get("status") == "unknown":
+                        return self._json(409, {"ok": False, "error": "needs_reconciliation", "run": run})
                     return self._json(200, {"ok": True, "run": run})
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
@@ -1050,9 +1369,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                     return self._json(502, {"error": f"{type(exc).__name__}: {exc}"})
             if parsed.path in ("/api/run/cancel", "/api/runs/cancel"):
                 try:
-                    run_id = payload.get("run_id") or parse_qs(parsed.query).get("id", [""])[0]
-                    if not isinstance(run_id, str) or not run_id:
-                        return self._json(400, {"error": "Не указан run_id"})
+                    run_id = payload["run_id"]
+                    if not isinstance(run_id, str) or not re.fullmatch(r"run_[A-Za-z0-9_-]{1,80}", run_id):
+                        return self._json(400, {"error": "Неверный run_id"})
                     res = _cancel_run(self.server.root, run_id)
                     code = 200 if res.get("ok") else 400
                     return self._json(code, res)
@@ -1064,8 +1383,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                 try:
                     run_id = payload.get("run_id")
                     text = payload.get("text")
-                    if not isinstance(run_id, str) or not run_id:
-                        return self._json(400, {"error": "Не указан run_id"})
+                    if not isinstance(run_id, str) or not re.fullmatch(r"run_[A-Za-z0-9_-]{1,80}", run_id):
+                        return self._json(400, {"error": "Неверный run_id"})
                     res = _steer_run(self.server.root, run_id, text if isinstance(text, str) else "")
                     code = 200 if res.get("ok") else 400
                     return self._json(code, res)
@@ -1073,6 +1392,16 @@ class PanelHandler(BaseHTTPRequestHandler):
                     return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
                 except (OSError, RuntimeError) as exc:
                     return self._json(502, {"error": f"{type(exc).__name__}: {exc}"})
+            if parsed.path == "/api/run/resume":
+                try:
+                    run_id = payload["run_id"]
+                    if not isinstance(run_id, str) or not re.fullmatch(r"run_[A-Za-z0-9_-]{1,80}", run_id):
+                        raise ValueError("Неверный run_id")
+                    return self._json(400, _resume_run(self.server.root, run_id))
+                except ValueError as exc:
+                    return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
+                except (OSError, RuntimeError) as exc:
+                    return self._json(502, {"error": type(exc).__name__ + ": протокол resume недоступен"})
             if not isinstance(payload.get("action"), str):
                 return self._json(400, {"error": "Неверный запрос"})
             name = payload["action"]

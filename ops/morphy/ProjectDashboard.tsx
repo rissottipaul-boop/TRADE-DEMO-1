@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowUpRight, Bot, Briefcase, CheckCircle2, ChevronRight,
   Clock3, Copy, FileText, GitBranch, Layers, Link2, ListTodo, Lock, Pause, Play,
-  Radio, RefreshCw, Search, ShieldAlert, ShieldCheck, Square, X
+  Radio, RefreshCw, Search, ShieldAlert, ShieldCheck, Sparkles, Square, X
 } from 'lucide-react';
 import {
   Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis
@@ -11,6 +11,8 @@ import {
 // @ts-ignore -- CSS обрабатывается сборщиком; объявления типов для него отсутствуют.
 import './project.css';
 import DotMeter from './project/DotMeter';
+import AssistantPanel from './project/AssistantPanel';
+import AgentToolsPanel from './project/AgentToolsPanel';
 import { SkeletonCard, SkeletonGroup, SkeletonPanel } from './project/Skeleton';
 import Spark from './project/Spark';
 import ThresholdBar from './project/ThresholdBar';
@@ -112,6 +114,11 @@ function HoldButton({ action, onTrigger, disabled }: HoldButtonProps) {
     action.id === 'engine.resume' ? <Play size={14} /> :
     <Lock size={14} />;
 
+  const effect = action.id.startsWith('kill.') ? 'изменит состояние kill-switch' :
+    action.id.startsWith('orders.') ? 'отправит отмену открытых demo-ордеров' :
+    action.id.startsWith('engine.') ? 'изменит состояние demo-движка' :
+    'сбросит соответствующий breaker';
+
   return (
     <button
       type="button"
@@ -120,7 +127,7 @@ function HoldButton({ action, onTrigger, disabled }: HoldButtonProps) {
       onPointerUp={clearHold}
       onPointerLeave={clearHold}
       disabled={disabled || !action.available}
-      title={action.reason || action.warning || `Удерживайте ${action.hold_ms / 1000} сек для подтверждения`}
+      title={`${action.reason || action.warning || `Удерживайте ${action.hold_ms / 1000} сек для подтверждения`}. Результат: ${effect}.`}
       aria-label={`${action.label}. Удерживайте для выполнения`}
     >
       {holding && <span className="pj-hold-progress" style={{ width: `${progress}%` }} />}
@@ -150,6 +157,7 @@ export default function ProjectDashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ msg: string; err?: boolean } | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
 
   // Модалка карточки задачи
   const [selectedTask, setSelectedTask] = useState<TaskDetail | { id: string; loading: true } | null>(null);
@@ -164,6 +172,11 @@ export default function ProjectDashboard() {
     input: string;
     submitting: boolean;
   } | null>(null);
+
+  // Вход в сессию Morphy прямо на экране
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginSubmitting, setLoginSubmitting] = useState(false);
+  const [loginErrMsg, setLoginErrMsg] = useState<string | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -180,6 +193,33 @@ export default function ProjectDashboard() {
       setLoading(false);
     }
   }, []);
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginPassword.trim() || loginSubmitting) return;
+    setLoginSubmitting(true);
+    setLoginErrMsg(null);
+    try {
+      const res = await fetch('/api/portal/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'admin', password: loginPassword.trim() }),
+      });
+      const resData = await res.json().catch(() => ({}));
+      if (res.ok && resData.token) {
+        localStorage.setItem('bloby_token', resData.token);
+        setLoginPassword('');
+        setError(null);
+        await loadState();
+      } else {
+        setLoginErrMsg(resData.error || 'Неверный пароль');
+      }
+    } catch {
+      setLoginErrMsg('Не удалось связаться с сервером');
+    } finally {
+      setLoginSubmitting(false);
+    }
+  };
 
   useEffect(() => {
     void loadState();
@@ -304,9 +344,12 @@ export default function ProjectDashboard() {
   const baselineUsdt = data?.equity?.baseline_usdt ?? lifetime?.base_usdt ?? null;
   const hwmUsdt = data?.equity?.hwm ?? risk?.hwm ?? null;
   const blocked = risk?.kill_active || risk?.daily_breaker || risk?.global_breaker;
+  const chartStart = chartData[0]?.equity;
+  const chartEnd = chartData.at(-1)?.equity;
+  const chartChangePct = chartStart && chartEnd != null ? (chartEnd / chartStart - 1) * 100 : null;
 
   return (
-    <div className="pj-root">
+    <div className={`pj-root${assistantOpen ? ' pj-root--assistant-open' : ''}`}>
       {/* ── Шапка ── */}
       <header className="pj-header">
         <div>
@@ -319,6 +362,16 @@ export default function ProjectDashboard() {
 
         <div className="pj-header-actions">
           <span className="pj-demo">DEMO MODE</span>
+          <button
+            type="button"
+            className={`pj-assistant-toggle${assistantOpen ? ' selected' : ''}`}
+            onClick={() => setAssistantOpen((open) => !open)}
+            aria-expanded={assistantOpen}
+            aria-label={assistantOpen ? 'Свернуть помощника Morphy' : 'Открыть помощника Morphy'}
+            title="Помощник Morphy · вопросы по текущему снимку проекта"
+          >
+            <Sparkles size={16} /><span>Помощник</span>
+          </button>
           <button
             type="button"
             className="pj-icon-button"
@@ -394,14 +447,36 @@ export default function ProjectDashboard() {
       )}
 
       {error === 'login' ? (
-        <div className="pj-notice">
-          <ShieldCheck size={20} />
-          <div>
+        <div className="pj-notice pj-login-notice">
+          <ShieldCheck size={28} />
+          <div style={{ flex: 1 }}>
             <strong>Требуется авторизация в Morphy</strong>
-            <p>Панель проекта использует сессию Morphy. Войдите в систему для доступа.</p>
-            <a href="/bloby" target="_top">
-              Вход в Morphy <ArrowUpRight size={14} />
-            </a>
+            <p>Панель проекта использует защищённую сессию Morphy для отображения состояния торговли, метрик и задач.</p>
+            <form onSubmit={handleLoginSubmit} className="pj-login-form">
+              <input
+                type="password"
+                placeholder="Введите пароль портала Morphy"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                autoComplete="current-password"
+                className="pj-login-input"
+              />
+              <button
+                type="submit"
+                disabled={!loginPassword.trim() || loginSubmitting}
+                className="pj-primary-button"
+              >
+                {loginSubmitting ? 'Вход...' : 'Войти'}
+              </button>
+              <a href="/bloby" target="_top" className="pj-login-alt-link">
+                Открыть чат Morphy <ArrowUpRight size={13} />
+              </a>
+            </form>
+            {loginErrMsg && (
+              <div className="pj-login-error" role="alert">
+                {loginErrMsg}
+              </div>
+            )}
           </div>
         </div>
       ) : error ? (
@@ -584,9 +659,19 @@ export default function ProjectDashboard() {
                 </div>
               </div>
 
+              {chartChangePct != null && (
+                <div className="pj-chart-insight" data-tone={chartChangePct < 0 ? 'warn' : 'info'}>
+                  <span><strong>{chartChangePct < 0 ? 'Снижение' : 'Изменение'} за период:</strong> {fmtPercent(chartChangePct, { sign: true })}</span>
+                  <span>{risk?.drawdown_pct != null
+                    ? `Текущая просадка от HWM: ${fmtPercent(risk.drawdown_pct, { sign: true })}`
+                    : 'Текущая просадка: нет данных'}</span>
+                  <small>Расчёт по точкам локального снимка; это не прогноз.</small>
+                </div>
+              )}
+
               {chartData.length > 1 ? (
                 <div className="pj-chart">
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={200}>
                     <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                       <defs>
                         <linearGradient id="pj-equity-grad" x1="0" y1="0" x2="0" y2="1">
@@ -751,7 +836,16 @@ export default function ProjectDashboard() {
                   ))}
                 </div>
               ) : (
-                <Empty>Нет открытых вопросов, требующих решения</Empty>
+                <div className="pj-task-empty-notice">
+                  <p>Нет открытых вопросов, требующих решения человека. Все процессы идут в штатном режиме.</p>
+                  <button
+                    type="button"
+                    className="pj-link-btn"
+                    onClick={() => setUrlState({ section: 'tasks' })}
+                  >
+                    Перейти ко всем задачам на доске ({tasks.length}) →
+                  </button>
+                </div>
               )}
             </section>
 
@@ -791,7 +885,16 @@ export default function ProjectDashboard() {
                   ))}
                 </div>
               ) : (
-                <Empty>Сейчас активных клеймов нет</Empty>
+                <div className="pj-task-empty-notice">
+                  <p>Сейчас активных клеймов нет. Задач, готовых к выполнению: {data.board?.ready_ids?.length || 0}.</p>
+                  <button
+                    type="button"
+                    className="pj-link-btn"
+                    onClick={() => setUrlState({ section: 'tasks', status: 'ready' })}
+                  >
+                    Смотреть готовые задачи ({data.board?.ready_ids?.length || 0}) →
+                  </button>
+                </div>
               )}
             </section>
           </div>
@@ -1002,6 +1105,7 @@ export default function ProjectDashboard() {
       {/* ── Вкладка «Агенты» (Agents) ── */}
       {data && tab === 'agents' && (
         <>
+          <AgentToolsPanel tasks={data.board?.tasks || []} />
           <div className="pj-runtime-grid">
             {data.runtimes?.map((r) => (
               <section className="pj-panel pj-runtime" key={r.id}>
@@ -1366,6 +1470,8 @@ export default function ProjectDashboard() {
           </section>
         </div>
       )}
+
+      <AssistantPanel data={data} open={assistantOpen} onClose={() => setAssistantOpen(false)} />
     </div>
   );
 }

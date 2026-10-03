@@ -27,6 +27,11 @@ export const CONFIRM_ENV = 'MORPHY_UI_RESET_BREAKER_CONFIRM';
 
 const ARM_PATH = '/api/project/action/arm';
 const COMMIT_PATH = '/api/project/action/commit';
+const AI_TOOL_PATH = '/api/project/ai/tool';
+const MAX_AI_BODY = 20_000;
+const AI_TOOLS = new Set(['panel.state', 'board.task', 'runs.list', 'run.get', 'run.events',
+  'run.result', 'ai.usage', 'ai.evals', 'assistant.draft', 'assistant.role',
+  'assistant.handoff', 'task.handoff', 'assistant.review', 'task.review', 'assistant.specialist']);
 const MAX_BODY = 2048;
 const ARM_TTL_MS = 30_000;
 const ARM_TTL_PHRASE_MS = 120_000;
@@ -47,6 +52,7 @@ type Options = {
   run?: (action: string, confirm: string | null) => Promise<ActionResult | null>;
   now?: () => number;
   exec?: Exec;
+  tool?: (name: string, arguments_: Record<string, unknown>) => Promise<any>;
 };
 type Arm = { action: string; session: Buffer; armedAt: number; holdMs: number; expiresAt: number; phrase: string | null };
 type Body = { ok: true; value: unknown } | { ok: false; status: number; error: string };
@@ -94,20 +100,20 @@ function publicResult(action: string, raw: ActionResult | null) {
   return { ok, action, summary, outcome, ...(details ? { details } : {}) };
 }
 
-function bodyProblem(req: any): [number, string] | null {
+function bodyProblem(req: any, maxBody = MAX_BODY): [number, string] | null {
   const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (type !== 'application/json') return [415, 'json-required'];
   const length = req.headers['content-length'];
   if (length === undefined) return [411, 'length-required'];
   if (!/^\d{1,9}$/.test(String(length))) return [400, 'invalid-length'];
-  if (Number(length) > MAX_BODY) return [413, 'body-too-large'];
+  if (Number(length) > maxBody) return [413, 'body-too-large'];
   return null;
 }
 
-async function readJson(req: any): Promise<Body> {
+async function readJson(req: any, maxBody = MAX_BODY): Promise<Body> {
   if (req.body !== undefined) {
     // Уже разобрано глобальным express.json() Morphy (index.ts): только сверка размера
-    if (Buffer.byteLength(JSON.stringify(req.body) ?? '', 'utf8') > MAX_BODY) return { ok: false, status: 413, error: 'body-too-large' };
+    if (Buffer.byteLength(JSON.stringify(req.body) ?? '', 'utf8') > maxBody) return { ok: false, status: 413, error: 'body-too-large' };
     return { ok: true, value: req.body };
   }
   if (typeof req[Symbol.asyncIterator] !== 'function') return { ok: false, status: 400, error: 'invalid-json' };
@@ -117,7 +123,7 @@ async function readJson(req: any): Promise<Body> {
   for await (const chunk of req) {
     const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
     size += part.length;
-    if (size > MAX_BODY) return { ok: false, status: 413, error: 'body-too-large' };
+    if (size > maxBody) return { ok: false, status: 413, error: 'body-too-large' };
     chunks.push(part);
   }
   try { return { ok: true, value: JSON.parse(Buffer.concat(chunks).toString('utf8')) }; }
@@ -142,6 +148,18 @@ export function mountProjectRoutes(app: any, options: Options = {}) {
   };
   const runPython = (args: string[], timeout: number, maxBuffer: number, extra: Record<string, string> = {}) =>
     exec(python, args, { cwd: project, windowsHide: true, timeout, maxBuffer, env: pythonEnv(extra), shell: false });
+  // Описание задачи передаётся по stdin: его нет в командной строке процесса.
+  const tool = options.tool || ((name: string, arguments_: Record<string, unknown>) => new Promise<any>((resolve, reject) => {
+    const child = execFile(python, ['-m', 'src.ai_tools_cli'], {
+      cwd: project, windowsHide: true, timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
+      env: pythonEnv(), shell: false, encoding: 'utf8',
+    }, (error, stdout) => {
+      try { const reply = JSON.parse(stdout); resolve(reply); }
+      catch { reject(new Error('ai-tool-unavailable')); }
+    });
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(JSON.stringify({ name, arguments: arguments_ }));
+  }));
 
   const validate = options.validate || (async (token: string) => {
     try {
@@ -237,9 +255,10 @@ export function mountProjectRoutes(app: any, options: Options = {}) {
     if (originBad) { send(res, 403, { error: 'local-origin-required' }); return; }
     const route = routeOf(req);
     const action = post && (route === ARM_PATH || route === COMMIT_PATH);
-    if (req.method !== 'GET' && !action) { send(res, 405, { error: 'read-only' }); return; }
-    if (action) {
-      const problem = bodyProblem(req);
+    const aiTool = post && route === AI_TOOL_PATH;
+    if (req.method !== 'GET' && !action && !aiTool) { send(res, 405, { error: 'read-only' }); return; }
+    if (action || aiTool) {
+      const problem = bodyProblem(req, aiTool ? MAX_AI_BODY : MAX_BODY);
       if (problem) { send(res, problem[0], { error: problem[1] }); return; }
     }
     const match = /^Bearer (\S{1,4096})$/.exec(req.headers.authorization || '');
@@ -257,6 +276,25 @@ export function mountProjectRoutes(app: any, options: Options = {}) {
     if (!/^[A-Z0-9_-]{1,80}$/.test(req.params.id)) { res.status(400).json({ error: 'invalid-task-id' }); return; }
     try { res.json(await collect(req.params.id)); }
     catch { res.status(404).json({ error: 'task-unavailable' }); }
+  });
+
+  app.post(AI_TOOL_PATH, async (req: any, res: any) => {
+    const body = await readJson(req, MAX_AI_BODY);
+    if (!body.ok) { send(res, body.status, { error: body.error }); return; }
+    const value = body.value;
+    if (!isObject(value) || !onlyKeys(value, ['name', 'arguments']) || typeof value.name !== 'string'
+        || !AI_TOOLS.has(value.name) || !isObject(value.arguments)) {
+      send(res, 400, { error: 'invalid-ai-tool' }); return;
+    }
+    try {
+      const reply = await tool(value.name, value.arguments);
+      if (!isObject(reply) || typeof reply.ok !== 'boolean') {
+        send(res, 503, { error: 'ai-tool-unavailable' }); return;
+      }
+      // Подробный текст исключения не выдаём: он может содержать аргумент запроса.
+      if (!reply.ok) { send(res, 400, { error: 'invalid-ai-arguments' }); return; }
+      res.json(reply);
+    } catch { send(res, 503, { error: 'ai-tool-unavailable' }); }
   });
 
   app.post(ARM_PATH, async (req: any, res: any) => {
