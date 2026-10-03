@@ -1,0 +1,42 @@
+/* Точечный счётчик. Заполненные точки — цвет порога (data-tone), пустые — обводка. */
+.pj-dots { display: block; min-width: 0; }
+.pj-dots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pj-sp-3);
+  margin-bottom: 6px;
+  font-size: var(--pj-fs-small);
+  line-height: var(--pj-lh-small);
+  color: var(--pj-text-muted);
+}
+.pj-dots-label { display: inline-flex; align-items: center; gap: var(--pj-sp-1); min-width: 0; }
+.pj-dots-value { color: var(--pj-text-2); font-weight: var(--pj-fw-medium); white-space: nowrap; }
+.pj-dots[data-tone='warn'] .pj-dots-value,
+.pj-dots[data-tone='crit'] .pj-dots-value { color: var(--pj-tone-fg); }
+.pj-dots-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-height: 10px;
+}
+.pj-dot-on,
+.pj-dot-off {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.pj-dot-on { background: var(--pj-tone-fg); }
+.pj-dot-off { box-shadow: inset 0 0 0 1.5px var(--pj-meter-empty); }
+.pj-dots-over {
+  font-size: var(--pj-fs-micro);
+  line-height: var(--pj-lh-micro);
+  color: var(--pj-crit);
+  font-weight: var(--pj-fw-semibold);
+}
+.pj-dots-none {
+  font-size: var(--pj-fs-micro);
+  color: var(--pj-text-muted);
+}

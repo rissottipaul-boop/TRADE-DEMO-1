@@ -1,0 +1,45 @@
+/* Пороговая полоса. Цвет заливки — data-tone (ok/warn/crit/none) из tokens.css. */
+.pj-tbar { display: block; min-width: 0; }
+.pj-tbar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pj-sp-3);
+  margin-bottom: 6px;
+  font-size: var(--pj-fs-small);
+  line-height: var(--pj-lh-small);
+  color: var(--pj-text-muted);
+}
+.pj-tbar-label { display: inline-flex; align-items: center; gap: var(--pj-sp-1); min-width: 0; }
+.pj-tbar-value { color: var(--pj-text-2); font-weight: var(--pj-fw-medium); white-space: nowrap; }
+.pj-tbar[data-tone='warn'] .pj-tbar-value,
+.pj-tbar[data-tone='crit'] .pj-tbar-value { color: var(--pj-tone-fg); }
+.pj-tbar-track {
+  position: relative;
+  height: 6px;
+  border-radius: var(--pj-r-pill);
+  background: var(--pj-meter-track);
+}
+.pj-tbar-track--empty {
+  background: none;
+  border: 1px dashed var(--pj-none-line);
+}
+.pj-tbar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--pj-tone-fg);
+  transition: width var(--pj-dur) var(--pj-ease), background-color var(--pj-dur) var(--pj-ease);
+}
+.pj-tbar-limit {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--pj-meter-limit);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pj-tbar-fill { transition: none; }
+}

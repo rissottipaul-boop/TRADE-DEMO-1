@@ -103,7 +103,7 @@ TCP-привязки Node-серверов до `127.0.0.1`. Bootstrap насл�
 и профили относятся к решениям человека. Для проверочной вкладки отдельно
 создана `MORPHY-VERIFY-LOGIN` на [доске](../board.md).
 
-## Guard проекта (MORPHY-GUARD-WIRE)
+## Guard проекта (MORPHY-GUARD-WIRE, MORPHY-GUARD-CODEX)
 
 AI-агент Morphy подключён к общему guard проекта. Мост `guard-hook.mjs`
 вызывает `ops/hooks/guard_adapter.py --client claude` (инструменты Read/Write/
@@ -114,19 +114,26 @@ Edit/Bash обоих harness зеркалят формат Claude Code); пра�
 - `supervisor/harnesses/claude.ts` — `hooks: guardHooks()` (PreToolUse hook
   Claude Agent SDK) во все три `query()`-сайта: живой разговор, one-shot
   pulse/cron/customer, agent-API;
-- `supervisor/harnesses/pi/session.ts` — pre-check `piGuardDeny` в `executeTool`.
+- `supervisor/harnesses/pi/session.ts` — pre-check `piGuardDeny` в `executeTool`;
+- `supervisor/harnesses/codex.ts` — `approvalPolicy: 'never'` → `'untrusted'`
+  (approval-запросы app-server начинают приходить) и решение каждого запроса
+  (`execCommandApproval`/`applyPatchApproval` и v2 `item/*/requestApproval`)
+  через `codexGuardDecision`: allow — одноразовый accept (не for-session, чтобы
+  каждый вызов снова шёл в guard), нераспознанная форма запроса — отказ в
+  сторону безопасности.
 
 Проверка канарейками (`node ops/morphy/guard-hook.test.mjs`) гоняет
 задеплоенный мост: `echo guard-e2e-ok` проходит, `echo withdraw-canary` и
-запись в `.github/hooks/` отклоняются с `[guard]`. Контракт guard сохранён:
-мост fail-open, сбой адаптера не роняет supervisor. Harness Codex
-(provider `openai`) через app-server мостом НЕ покрыт — при переключении
-провайдера на openai guard не действует (см. оценку ниже). После обновления
-upstream деплой повторить; скрипт идемпотентен и сверяет версию 0.5.0.
+запись в `.github/hooks/` отклоняются с `[guard]` — для SDK-хука, pi-pre-check
+и обоих словарей approval Codex. Контракт guard сохранён: мост fail-open,
+сбой адаптера не роняет supervisor; нераспознанный approval Codex — fail-closed.
+Живой прогон codex-harness с provider `openai` не выполнялся (переключение
+провайдера — решение человека); отправка approval-запросов при
+`approvalPolicy: 'untrusted'` — документированное поведение `codex app-server`,
+подтверждённое кодом harness, но не живой сессией. После обновления upstream
+деплой повторить; скрипт идемпотентен и сверяет версию 0.5.0.
 
-До использования Morphy как исполнителя задач проекта harness Codex требует
-отдельной проверки поддержки проектных ограничений. Чтение данных для панели
-подключено отдельно, без запуска агентов.
+Чтение данных для панели подключено отдельно, без запуска агентов.
 
 Полный результат, лицензия, стоимость и ограничения:
 [оценка Morphy](../../insights/morphy-local-evaluation.md).

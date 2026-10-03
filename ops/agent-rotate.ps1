@@ -28,10 +28,13 @@ param(
     [ValidateSet('claude', 'antigravity', 'gemini', 'muse', 'codex')]
     [string[]]$SkipAgent = @(),
     [string]$Model,
+    [string]$RunId,
     [switch]$Headless,
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
+# Panel correlation ID only: logged verbatim, never added to the prompt.
+if ($RunId -and $RunId -notmatch '^run_[A-Za-z0-9_-]{1,80}$') { throw 'Invalid -RunId format.' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $registry = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'agent-routing.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($registry.schema_version -ne 1) { throw 'Unsupported agent-routing schema.' }
@@ -128,7 +131,8 @@ function Write-RotationLog([string]$Event, [int]$Code) {
         $logDir = Join-Path $projectRoot 'logs'
         $null = New-Item -ItemType Directory -Force -Path $logDir
         [ordered]@{ ts = (Get-Date -Format o); agent = $selected.agent; model = $selected.model
-            role = $Role; task = $TaskId; event = $Event; exit_code = $Code } |
+            role = $Role; task = $TaskId; event = $Event; exit_code = $Code
+            run_id = $(if ($RunId) { $RunId } else { $null }) } |
             ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $logDir 'agent-rotate.log') -Encoding UTF8
     } catch { Write-Warning 'Could not write the rotation log.' }
 }

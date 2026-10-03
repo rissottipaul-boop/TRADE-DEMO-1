@@ -1,0 +1,215 @@
+/*
+ * Дизайн-токены экрана проекта (Morphy). Единый словарь для оболочки и модулей.
+ * Тёмная тема. Все переменные объявлены на корневом .pj-root: модуль, отрисованный
+ * вне .pj-root, токенов не увидит — поповеры рендерятся внутри дерева, без порталов.
+ *
+ * Правила палитры (critique.md §3):
+ *   - UI-акцент (выбранная вкладка, ссылки, фокус, primary-кнопка) — лавандовый
+ *     slate (--pj-accent*), а не зелёный;
+ *   - зелёный — ТОЛЬКО деньги в плюсе (--pj-money-pos) и здоровье/ок (--pj-ok);
+ *   - амбер — внимание (--pj-warn), красный — авария (--pj-crit),
+ *     деньги в минусе — отдельный коралловый (--pj-money-neg), не «авария».
+ *
+ * Контраст проверяет ops/morphy/harness/contrast.mjs по объявлениям @contrast ниже.
+ * Формат: «@contrast <уровень> <цвета текста> / <подложки>».
+ *   уровень text  — порог 4.5:1 (обычный текст, WCAG AA);
+ *   уровень large — порог 3:1, только крупный (≥18.66px полужирный) или неактивный текст;
+ *   уровень ui    — порог 3:1, нетекстовые элементы (кольцо фокуса, засечки), WCAG 1.4.11.
+ * «--a@--b» — полупрозрачная подложка --a поверх --b; «--fg*--alpha» — цвет текста
+ * с прозрачностью из токена --alpha (приглушённые десятые).
+ *
+ * @contrast text --pj-text --pj-text-2 --pj-text-muted / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3 --pj-surface-inset
+ * @contrast text --pj-accent --pj-accent-strong / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3 --pj-accent-bg@--pj-bg --pj-accent-bg@--pj-surface-1 --pj-accent-bg@--pj-surface-2
+ * @contrast text --pj-on-accent / --pj-accent-solid
+ * @contrast text --pj-on-crit / --pj-crit-solid
+ * @contrast text --pj-ok --pj-money-pos / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3 --pj-ok-bg@--pj-surface-1 --pj-ok-bg@--pj-surface-2 --pj-ok-bg@--pj-bg
+ * @contrast text --pj-money-neg / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3 --pj-neg-bg@--pj-surface-1
+ * @contrast text --pj-warn / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3 --pj-warn-bg@--pj-surface-1 --pj-warn-bg@--pj-surface-2 --pj-warn-bg@--pj-bg
+ * @contrast text --pj-crit / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3 --pj-crit-bg@--pj-surface-1 --pj-crit-bg@--pj-surface-2 --pj-crit-bg@--pj-bg
+ * @contrast text --pj-info / --pj-bg --pj-surface-1 --pj-surface-2 --pj-info-bg@--pj-surface-1 --pj-info-bg@--pj-surface-2
+ * @contrast text --pj-neutral / --pj-bg --pj-surface-1 --pj-surface-2 --pj-neutral-bg@--pj-surface-1 --pj-neutral-bg@--pj-surface-2
+ * @contrast text --pj-accent / --pj-accent-bg@--pj-surface-3
+ * @contrast text --pj-text-muted --pj-text-2 / --pj-none-bg@--pj-surface-1 --pj-none-bg@--pj-surface-2
+ * @contrast text --pj-text*--pj-decimals-alpha --pj-money-pos*--pj-decimals-alpha --pj-money-neg*--pj-decimals-alpha --pj-text-2*--pj-decimals-alpha / --pj-bg --pj-surface-1 --pj-surface-2
+ * @contrast text --pj-chart-axis / --pj-surface-1 --pj-surface-2
+ * @contrast large --pj-text-faint / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3
+ * @contrast ui --pj-focus / --pj-bg --pj-surface-1 --pj-surface-2 --pj-surface-3
+ * @contrast ui --pj-ok --pj-warn --pj-crit --pj-meter-limit / --pj-meter-track@--pj-surface-1 --pj-meter-track@--pj-surface-2
+ * @contrast ui --pj-meter-empty / --pj-surface-1 --pj-surface-2
+ */
+
+.pj-root {
+  /* ── Поверхности ─────────────────────────────────────────────── */
+  --pj-bg: #0a0a0a;                 /* фон страницы Morphy (хост), под заголовком и футером */
+  --pj-surface-1: #1d242a;          /* панель */
+  --pj-surface-2: #222a31;          /* приподнятая: карточка метрики, модалка, поповер */
+  --pj-surface-3: #29323a;          /* hover/нажатие, тултип графика */
+  --pj-surface-inset: #161c21;      /* поля ввода, дорожки баров */
+  --pj-backdrop: rgba(5, 11, 17, 0.72);
+
+  /* ── Текст ───────────────────────────────────────────────────── */
+  --pj-text: #eef3f6;               /* основной */
+  --pj-text-2: #c0cad2;             /* вторичный: подписи значений, ячейки таблиц */
+  --pj-text-muted: #98a6b2;         /* приглушённый: подсказки, источники, время */
+  --pj-text-faint: #7b8a96;         /* только неактивный/декоративный текст (порог 3:1) */
+  --pj-decimals-alpha: 0.72;        /* прозрачность приглушённых десятых */
+
+  /* ── Границы ─────────────────────────────────────────────────── */
+  --pj-line: rgba(255, 255, 255, 0.07);
+  --pj-line-strong: rgba(255, 255, 255, 0.14);
+
+  /* ── UI-акцент: лавандовый slate (вкладка, ссылки, фокус, primary) ── */
+  --pj-accent: #b3a9f5;
+  --pj-accent-strong: #cbc3fb;      /* hover ссылок */
+  --pj-accent-bg: rgba(179, 169, 245, 0.13);
+  --pj-accent-line: rgba(179, 169, 245, 0.38);
+  --pj-accent-solid: #a397f0;       /* фон primary-кнопки */
+  --pj-on-accent: #17132c;          /* текст на primary-кнопке */
+  --pj-focus: #c9c0ff;              /* кольцо фокуса */
+  --pj-focus-width: 2px;
+
+  /* ── Смысловые тона ──────────────────────────────────────────── */
+  /* здоровье/ок — зелёный, только для «всё работает» */
+  --pj-ok: #4fd5b0;
+  --pj-ok-bg: rgba(79, 213, 176, 0.11);
+  --pj-ok-line: rgba(79, 213, 176, 0.32);
+  /* деньги */
+  --pj-money-pos: #4fd5b0;
+  --pj-money-neg: #f6a590;
+  --pj-neg-bg: rgba(244, 160, 139, 0.11);
+  --pj-neg-line: rgba(244, 160, 139, 0.32);
+  /* внимание */
+  --pj-warn: #f2b66d;
+  --pj-warn-bg: rgba(242, 182, 109, 0.11);
+  --pj-warn-line: rgba(242, 182, 109, 0.34);
+  /* авария */
+  --pj-crit: #ff8f88;
+  --pj-crit-bg: rgba(255, 103, 95, 0.13);
+  --pj-crit-line: rgba(255, 103, 95, 0.45);
+  --pj-crit-solid: #c4303a;         /* фон кнопки kill-switch */
+  --pj-on-crit: #ffffff;
+  /* информация (в работе) */
+  --pj-info: #88c3f2;
+  --pj-info-bg: rgba(136, 195, 242, 0.12);
+  --pj-info-line: rgba(136, 195, 242, 0.32);
+  /* нейтральный статус (выполнено, по расписанию) */
+  --pj-neutral: #aebac4;
+  --pj-neutral-bg: rgba(174, 186, 196, 0.1);
+  --pj-neutral-line: rgba(174, 186, 196, 0.26);
+  /* нет данных — не ноль и не «плохо»: приглушённый с пунктиром */
+  --pj-none-bg: rgba(152, 166, 178, 0.08);
+  --pj-none-line: rgba(152, 166, 178, 0.32);
+
+  /* ── Индикаторы (ThresholdBar, DotMeter) ─────────────────────── */
+  --pj-meter-track: rgba(255, 255, 255, 0.07);
+  --pj-meter-limit: #dbe3e9;        /* засечка лимита */
+  --pj-meter-empty: #6c7a86;        /* пустая точка ○ (обводка) */
+
+  /* ── Графики ─────────────────────────────────────────────────── */
+  --pj-chart-series: #a9b9d8;       /* нейтральная серия (капитал) */
+  --pj-chart-grid: rgba(255, 255, 255, 0.06);
+  --pj-chart-axis: #98a6b2;
+  --pj-chart-baseline: #98a6b2;     /* внесённые деньги */
+  --pj-chart-hwm: #b3a9f5;          /* high-water-mark */
+  --pj-chart-pos-fill: rgba(79, 213, 176, 0.18);
+  --pj-chart-neg-fill: rgba(244, 160, 139, 0.18);
+
+  /* ── Типографика: шкала текста ровно 13 / 11 / 10 px ─────────── */
+  --pj-font-sans: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --pj-font-mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace;
+  --pj-fs-body: 13px;
+  --pj-fs-small: 11px;
+  --pj-fs-micro: 10px;              /* минимум: подписи осей, бейджи, ID */
+  --pj-lh-body: 1.55;
+  --pj-lh-small: 1.5;
+  --pj-lh-micro: 1.4;
+  --pj-lh-tight: 1.2;
+  /* Заголовки и ключевые числа — не текстовая шкала, а отдельные кегли */
+  --pj-fs-h1: 28px;
+  --pj-fs-title: 15px;              /* заголовок панели */
+  --pj-fs-value: 22px;              /* значение карточки метрики */
+  --pj-fs-value-sm: 18px;           /* то же на телефоне */
+  --pj-fw-regular: 400;
+  --pj-fw-medium: 500;
+  --pj-fw-semibold: 600;
+  --pj-fw-bold: 650;
+
+  /* ── Радиусы ─────────────────────────────────────────────────── */
+  --pj-r-xs: 4px;
+  --pj-r-sm: 6px;
+  --pj-r-md: 9px;
+  --pj-r-lg: 14px;
+  --pj-r-xl: 17px;
+  --pj-r-pill: 999px;
+
+  /* ── Отступы (шаг 4px) ───────────────────────────────────────── */
+  --pj-sp-1: 4px;
+  --pj-sp-2: 8px;
+  --pj-sp-3: 12px;
+  --pj-sp-4: 16px;
+  --pj-sp-5: 20px;
+  --pj-sp-6: 24px;
+  --pj-sp-7: 32px;
+  --pj-sp-8: 40px;
+
+  /* ── Тени и слои ─────────────────────────────────────────────── */
+  --pj-shadow-pop: 0 12px 36px rgba(0, 0, 0, 0.55);
+  --pj-shadow-modal: 0 24px 100px rgba(0, 0, 0, 0.45);
+  --pj-z-sticky: 20;
+  --pj-z-popover: 60;
+  --pj-z-modal: 500;
+
+  /* ── Движение ────────────────────────────────────────────────── */
+  --pj-dur-fast: 120ms;
+  --pj-dur: 200ms;
+  --pj-dur-slow: 1400ms;            /* мерцание скелетона */
+  --pj-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pj-root {
+    --pj-dur-fast: 0ms;
+    --pj-dur: 0ms;
+    --pj-dur-slow: 0ms;
+  }
+}
+
+/* ── Тона по атрибуту data-tone: компоненты читают --pj-tone-* ──── */
+.pj-root [data-tone] { --pj-tone-fg: var(--pj-neutral); --pj-tone-bg: var(--pj-neutral-bg); --pj-tone-line: var(--pj-neutral-line); }
+.pj-root [data-tone='accent'] { --pj-tone-fg: var(--pj-accent); --pj-tone-bg: var(--pj-accent-bg); --pj-tone-line: var(--pj-accent-line); }
+.pj-root [data-tone='info'] { --pj-tone-fg: var(--pj-info); --pj-tone-bg: var(--pj-info-bg); --pj-tone-line: var(--pj-info-line); }
+.pj-root [data-tone='ok'] { --pj-tone-fg: var(--pj-ok); --pj-tone-bg: var(--pj-ok-bg); --pj-tone-line: var(--pj-ok-line); }
+.pj-root [data-tone='pos'] { --pj-tone-fg: var(--pj-money-pos); --pj-tone-bg: var(--pj-ok-bg); --pj-tone-line: var(--pj-ok-line); }
+.pj-root [data-tone='neg'] { --pj-tone-fg: var(--pj-money-neg); --pj-tone-bg: var(--pj-neg-bg); --pj-tone-line: var(--pj-neg-line); }
+.pj-root [data-tone='warn'] { --pj-tone-fg: var(--pj-warn); --pj-tone-bg: var(--pj-warn-bg); --pj-tone-line: var(--pj-warn-line); }
+.pj-root [data-tone='crit'] { --pj-tone-fg: var(--pj-crit); --pj-tone-bg: var(--pj-crit-bg); --pj-tone-line: var(--pj-crit-line); }
+.pj-root [data-tone='none'] { --pj-tone-fg: var(--pj-text-muted); --pj-tone-bg: var(--pj-none-bg); --pj-tone-line: var(--pj-none-line); }
+
+/* ── Утилиты ─────────────────────────────────────────────────────── */
+/* Цифры одинаковой ширины: при рефреше разряды не дёргаются */
+.pj-root .pj-num,
+.pj-root [data-num] {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+/* Приглушённые десятые: «109 433» + «,21» */
+.pj-root .pj-muted-decimals { opacity: var(--pj-decimals-alpha); }
+.pj-root .pj-mono { font-family: var(--pj-font-mono); }
+
+.pj-root .pj-sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Единое кольцо фокуса для интерактивных элементов */
+.pj-root :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--pj-focus-width) solid var(--pj-focus);
+  outline-offset: 2px;
+}

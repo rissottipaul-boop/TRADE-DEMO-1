@@ -1,0 +1,47 @@
+/* Спарклайн. Цвет — из data-tone (tokens.css); нейтральная серия — --pj-chart-series. */
+.pj-spark {
+  position: relative;
+  display: block;
+  width: 100%;
+  --pj-spark-color: var(--pj-tone-fg, var(--pj-chart-series));
+}
+.pj-spark[data-tone='neutral'] { --pj-spark-color: var(--pj-chart-series); }
+.pj-spark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.pj-spark-line {
+  fill: none;
+  stroke: var(--pj-spark-color);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.pj-spark-area {
+  fill: var(--pj-spark-color);
+  opacity: 0.12;
+  stroke: none;
+}
+.pj-spark-base {
+  stroke: var(--pj-chart-baseline);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+.pj-spark-dot {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: var(--pj-spark-color);
+  box-shadow: 0 0 0 2px var(--pj-surface-2);
+  pointer-events: none;
+}
+.pj-spark--empty line {
+  stroke: var(--pj-text-faint);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}

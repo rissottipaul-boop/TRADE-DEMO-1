@@ -161,22 +161,37 @@ def _instrument_section(store, inst, args, since_ms, until_ms):
     bh = Backtest(ins, BuyAndHold(), spec, **kw).run()
     sma = Backtest(ins, SmaCross(**SMA_DEFAULT), spec, **kw).run()
     m_bh, m_sma = bh.metrics(), sma.metrics()
-    sens = [("buy&hold", "fee×1, slip 5 бп (база)", m_bh),
-            (sma_name, "fee×1, slip 5 бп (база)", m_sma)]
+    sens_runs = [("buy&hold", "fee×1, slip 5 бп (база)", bh),
+            (sma_name, "fee×1, slip 5 бп (база)", sma)]
     for label, costs in scenarios:
         for name, make in strategies:
-            sens.append((name, label, Backtest(ins, make(), spec, costs=costs, **kw)
-                         .run().metrics()))
+            sens_runs.append((name, label, Backtest(ins, make(), spec, costs=costs, **kw)
+                         .run()))
+    sens = [(name, label, r.metrics()) for name, label, r in sens_runs]
     log.info("%s: in-sample и чувствительность %.1fс", inst, time.time() - t)
 
     t = time.time()
     checks = []
+    la_trips = []  # (прогон, время, просадка %, отклонено входов) из anti-lookahead прогонов
     for p in LA_PARAMS:
         la = lookahead_check(lambda p=p: SmaCross(**p), ins, spec, max_points=args.la_points,
                              bar=bar)
         rc = recursive_check(lambda p=p: SmaCross(**p), ins, spec, offsets=args.rc_offsets,
                              bar=bar)
         checks.append((p, la, rc))
+        tag = f"SMA {p['fast']}/{p['slow']}"
+        la_trips += [(f"{tag} slicing base", ts, dd, R.breaker_rejections(la["base_result"]))
+                     for ts, dd in R.breaker_trips(la["base_result"])]
+        for k, r in la["sliced_results"].items():
+            la_trips += [(f"{tag} slicing k={k}", ts, dd, R.breaker_rejections(r))
+                         for ts, dd in R.breaker_trips(r)]
+        la_trips += [(f"{tag} recursive base", ts, dd, R.breaker_rejections(rc["base_result"]))
+                     for ts, dd in R.breaker_trips(rc["base_result"])]
+        for x in rc["runs"]:
+            if "result" in x:
+                la_trips += [(f"{tag} recursive +{x['offset']}", ts, dd,
+                              R.breaker_rejections(x["result"]))
+                             for ts, dd in R.breaker_trips(x["result"])]
     la_ok = all(la["ok"] for _, la, _ in checks)
     rc_ok = all(rc["ok"] for _, _, rc in checks)
     log.info("%s: anti-lookahead проверки %.1fс", inst, time.time() - t)
@@ -270,6 +285,14 @@ def _instrument_section(store, inst, args, since_ms, until_ms):
                                                            [w.test for w in wf_bh.windows])):
         for r in results:
             trips += [(name, ts, dd, R.breaker_rejections(r)) for ts, dd in R.breaker_trips(r)]
+    for _n, _label, _r in sens_runs[2:]:  # базу покрывают in-sample прогоны выше
+        trips += [(f"{_n} {_label}", ts, dd, R.breaker_rejections(_r))
+                  for ts, dd in R.breaker_trips(_r)]
+    for _n, _rs in (("SMA-cross WF OOS stress", [w.test_stress for w in wf.windows]),
+                    ("buy&hold WF OOS stress", [w.test_stress for w in wf_bh.windows])):
+        for _r in _rs:
+            trips += [(_n, ts, dd, R.breaker_rejections(_r)) for ts, dd in R.breaker_trips(_r)]
+    trips += la_trips
     rc_div = [(p, x["offset"], e) for p, _, rc in checks for x in rc["runs"]
               for e in x.get("risk_divergences", [])]
     summary = {"inst": inst, "dataset_id": ds.dataset_id, "bh": m_bh, "sma": m_sma, "oos": oos,
@@ -313,17 +336,17 @@ def _conclusions(summaries) -> list[str]:
                  "(`analysis._synced_intervals`).")
     out.append(line)
     trips = [(s["inst"],) + t for s in summaries for t in s["breaker_trips"]]
-    early = [t for t in trips if t[3] < risk.GLOBAL_DD_LIMIT_PCT]
+    early = [t for t in trips if t[3] < risk.GLOBAL_DD_LIMIT_PCT - 1e-9]  # допуск: ровно -15% — не раньше
     if early:
         items = "; ".join(f"{inst} {name} — {R.d(ts)} при просадке {R.f(dd)}%, после него "
                           f"отклонено входов: {n}" for inst, name, ts, dd, n in early)
         wf_hit = any(name.endswith("WF OOS") for _, name, *_ in early)
         out.append(f"- Риск-ядро: global_breaker срабатывал раньше номинала "
-                   f"−{risk.GLOBAL_DD_LIMIT_PCT:g}%: {items}. Причина в `src/risk.py`: "
-                   "`record_pnl` прибавляет PnL к equity, которую `update_equity` уже переоценил "
-                   "по рынку (двойной учёт, HWM завышается). Бэктест повторяет боевое поведение "
-                   "(паритет), ошибка — в безопасную сторону, но in-sample результаты этих "
-                   "прогонов после даты срабатывания занижены (торговля остановлена). "
+                   f"−{risk.GLOBAL_DD_LIMIT_PCT:g}%: {items}. "
+                   "In-sample результаты этих прогонов после даты "
+                   "срабатывания занижены (торговля остановлена). "
+                   "Порог — строго ниже −15% (точное равенство не считается ранним). "
+
                    + ("Затронуты и test-окна walk-forward — гейт считать с оговоркой."
                       if wf_hit else "На WF OOS и гейт не влияет: в test-окнах breaker не "
                                      "срабатывал."))

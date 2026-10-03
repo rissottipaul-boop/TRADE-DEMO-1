@@ -193,10 +193,16 @@ class RunManagerTests(unittest.TestCase):
 
     def test_runtime_capabilities_reports_matrix_for_four_clients(self):
         caps = panel.runtime_capabilities(self.root)
-        self.assertEqual(set(caps["codex"]), {"status"})
-        self.assertEqual(set(caps["claude"]), {"status"})
-        self.assertEqual(set(caps["gemini"]), {"status"})
+        # start скрыт без E2E-подтверждения; events — курсорные события локальной записи.
+        self.assertEqual(set(caps["codex"]), {"status", "events"})
+        self.assertEqual(set(caps["claude"]), {"status", "events"})
+        self.assertEqual(set(caps["gemini"]), {"status", "events"})
         self.assertEqual(set(caps["muse"]), {"status", "events"})
+        for runtime in ("codex", "claude", "gemini", "muse"):
+            self.assertNotIn("steer", caps[runtime])
+            self.assertNotIn("cancel", caps[runtime])
+        provenance = panel.capabilities_provenance()
+        self.assertIn("launch-e2e.json", json.dumps(provenance))
 
     def test_launch_requires_protected_e2e_evidence(self):
         registry = json.loads((self.root / "ops" / "agent-routing.json").read_text(encoding="utf-8"))
@@ -259,6 +265,224 @@ class RunManagerTests(unittest.TestCase):
 
             recovered = panel._get_run(self.root, run1["id"], check_alive=False)
             self.assertEqual(recovered["status"], "unknown")
+
+    def test_launcher_finish_event_completes_run_with_provenance(self):
+        (self.root / "logs").mkdir()
+        panel._save_run(self.root, {"id": "run_T1_ingest", "task_id": "T1",
+            "role": "insight-executor", "runtime": "codex", "status": "running", "pid": 7777,
+            "events": [{"cursor": 1, "type": "run.started",
+                        "ts": "2026-10-03T04:00:00+00:00", "data": {}}]})
+        (self.root / "logs" / "agent-rotate.log").write_text("\n".join([
+            json.dumps({"ts": "2026-10-03T04:00:01+00:00", "agent": "codex", "event": "start",
+                        "exit_code": 0, "run_id": "run_T1_ingest"}),
+            json.dumps({"ts": "2026-10-03T04:05:00+00:00", "agent": "codex", "event": "finish",
+                        "exit_code": 0, "run_id": "run_T1_ingest"}),
+            json.dumps({"ts": "2026-10-03T04:06:00+00:00", "agent": "codex", "event": "finish",
+                        "exit_code": 1, "run_id": "run_T9_foreign"}),
+        ]) + "\n", encoding="utf-8")
+        with patch.object(panel, "process_alive", return_value=False):
+            loaded = panel._get_run(self.root, "run_T1_ingest")
+        self.assertEqual(loaded["status"], "completed")
+        self.assertEqual(loaded["exit_code"], 0)
+        # Код выхода не доказывает критерий доски — качество фиксируется явно.
+        self.assertEqual(loaded["result_quality"], "exit-code-only")
+        types = [event["type"] for event in loaded["events"]]
+        self.assertEqual(types, ["run.started", "run.progress", "run.completed"])
+        self.assertEqual(loaded["events"][-1]["data"]["provenance"], "logs/agent-rotate.log")
+        # Повторное чтение не дублирует события журнала (устойчивый курсор).
+        again = panel._get_run(self.root, "run_T1_ingest")
+        self.assertEqual(len(again["events"]), 3)
+
+    def test_unknown_run_recovers_from_launcher_log_and_unblocks_restart(self):
+        panel._save_run(self.root, {"id": "run_T1_lost", "task_id": "T1",
+            "role": "insight-executor", "runtime": "codex", "status": "unknown",
+            "started_at": "2026-10-03T03:00:00+00:00", "events": []})
+        with patch.object(panel, "_agent_plan", return_value={"selected": "codex", "launch_enabled": True}), \
+             patch.object(panel, "_spawn_agent_process", return_value=3333) as spawn_mock, \
+             patch.object(panel, "process_alive", return_value=True):
+            with self.assertRaisesRegex(ValueError, "Итог прежнего запуска неизвестен"):
+                panel._start_run(self.root, "T1", "insight-executor", "codex")
+            spawn_mock.assert_not_called()
+            # Recovery: журнал лаунчера подтверждает исход — unknown становится failed.
+            (self.root / "logs").mkdir()
+            (self.root / "logs" / "agent-rotate.log").write_text(json.dumps({
+                "ts": "2026-10-03T03:10:00+00:00", "agent": "codex", "event": "finish",
+                "exit_code": 3, "run_id": "run_T1_lost"}) + "\n", encoding="utf-8")
+            recovered = panel._get_run(self.root, "run_T1_lost")
+            self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(recovered["exit_code"], 3)
+            # Сверка состоялась — повтор задачи снова разрешён.
+            run = panel._start_run(self.root, "T1", "insight-executor", "codex")
+            self.assertEqual(run["status"], "running")
+            self.assertEqual(spawn_mock.call_count, 1)
+            self.assertEqual(spawn_mock.call_args.kwargs["run_id"], run["id"])
+            self.assertIsNone(spawn_mock.call_args.kwargs["workdir"])
+
+    def test_worktree_start_creates_lease_and_launches_isolated_copy(self):
+        worktree = self.root.parent / "panel-test-worktrees" / "run_wt"
+        def fake_prepare(root, task_id, run_id):
+            return {"schema_version": 1, "task_id": task_id, "run_id": run_id,
+                    "worktree": str(worktree), "branch": f"agent/{run_id}",
+                    "base_commit": "abc123", "state": "active"}
+        with patch.object(panel, "_agent_plan", return_value={"selected": "codex", "launch_enabled": True}), \
+             patch.object(panel, "prepare_worktree", side_effect=fake_prepare) as prepare_mock, \
+             patch.object(panel, "_spawn_agent_process", return_value=5555) as spawn_mock, \
+             patch.object(panel, "process_alive", return_value=True):
+            run = panel._start_run(self.root, "T1", "insight-executor", "codex",
+                                   workspace="worktree")
+        prepare_mock.assert_called_once_with(self.root, "T1", run["id"])
+        self.assertEqual(spawn_mock.call_args.kwargs["workdir"], worktree)
+        self.assertEqual(spawn_mock.call_args.kwargs["run_id"], run["id"])
+        self.assertEqual(run["workspace"], "worktree")
+        self.assertEqual(run["lease"]["state"], "active")
+        self.assertEqual(run["lease"]["base_commit"], "abc123")
+        # События и стоимость читаются из журнала внутри worktree — provenance явный.
+        self.assertTrue(run["rotation_log"].endswith("logs/agent-rotate.log"))
+        self.assertIn("run_wt", run["rotation_log"])
+        self.assertEqual(run["cost"]["quality"], "unknown")
+        self.assertIn(run["rotation_log"], run["cost"]["provenance"])
+        with self.assertRaisesRegex(ValueError, "Неверный workspace"):
+            panel._start_run(self.root, "T1", "insight-executor", "codex", workspace="shared")
+
+    def test_worktree_lease_conflict_blocks_start_without_spawn(self):
+        from src.worktree_lease import LeaseError
+        with patch.object(panel, "_agent_plan", return_value={"selected": "codex", "launch_enabled": True}), \
+             patch.object(panel, "prepare_worktree",
+                          side_effect=LeaseError("Задача уже имеет lease; сверьте прежний запуск")), \
+             patch.object(panel, "_spawn_agent_process") as spawn_mock:
+            with self.assertRaisesRegex(ValueError, "Worktree lease недоступен"):
+                panel._start_run(self.root, "T1", "insight-executor", "codex",
+                                 workspace="worktree")
+        spawn_mock.assert_not_called()
+
+    def test_finished_worktree_run_releases_lease_without_deleting_worktree(self):
+        (self.root / "logs").mkdir()
+        panel._save_run(self.root, {"id": "run_T1_wt_done", "task_id": "T1",
+            "role": "insight-executor", "runtime": "codex", "status": "running", "pid": 6666,
+            "workspace": "worktree",
+            "lease": {"task_id": "T1", "run_id": "run_T1_wt_done", "worktree": "C:/x",
+                      "branch": "agent/run_T1_wt_done", "base_commit": "abc", "state": "active"},
+            "events": []})
+        (self.root / "logs" / "agent-rotate.log").write_text(json.dumps({
+            "ts": "2026-10-03T05:00:00+00:00", "agent": "codex", "event": "finish",
+            "exit_code": 0, "run_id": "run_T1_wt_done"}) + "\n", encoding="utf-8")
+        released = {"task_id": "T1", "run_id": "run_T1_wt_done", "worktree": "C:/x",
+                    "branch": "agent/run_T1_wt_done", "base_commit": "abc",
+                    "state": "released", "released_at": "2026-10-03T05:00:01+00:00"}
+        with patch.object(panel, "process_alive", return_value=False), \
+             patch.object(panel, "release_lease", return_value=released) as release_mock:
+            loaded = panel._get_run(self.root, "run_T1_wt_done")
+        release_mock.assert_called_once_with(self.root, "T1", "run_T1_wt_done", state="released")
+        self.assertEqual(loaded["status"], "completed")
+        self.assertEqual(loaded["lease"]["state"], "released")
+        self.assertEqual(loaded["lease"]["released_at"], "2026-10-03T05:00:01+00:00")
+
+    def test_steer_is_unsupported_without_confirmed_client_protocol(self):
+        panel._save_run(self.root, {"id": "run_T1_steer", "task_id": "T1",
+            "runtime": "codex", "status": "running", "events": []})
+        result = panel._steer_run(self.root, "run_T1_steer", "сначала проверь тесты")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "unsupported")
+        self.assertEqual(panel._get_run(self.root, "run_T1_steer")["status"], "running")
+        with self.assertRaisesRegex(ValueError, "Неверная инструкция"):
+            panel._steer_run(self.root, "run_T1_steer", "  ")
+        with self.assertRaisesRegex(ValueError, "не найден"):
+            panel._steer_run(self.root, "run_missing_x", "текст")
+
+    def test_native_claude_session_supplies_events_and_reported_cost(self):
+        home = Path(self.temp.name) / "fake-home"
+        slug = panel.native_sessions.claude_project_slug(str(self.root))
+        session = home / ".claude" / "projects" / slug / "sess-native-1.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text("\n".join([
+            json.dumps({"type": "queue-operation", "sessionId": "sess-native-1",
+                        "timestamp": "2026-10-03T04:00:05.000Z"}),
+            json.dumps({"type": "user", "sessionId": "sess-native-1",
+                        "timestamp": "2026-10-03T04:00:06.000Z",
+                        "message": {"content": "NATIVE-PROMPT-CANARY"}}),
+            json.dumps({"type": "assistant", "sessionId": "sess-native-1",
+                        "timestamp": "2026-10-03T04:01:00.000Z",
+                        "message": {"model": "claude-opus-5-5",
+                                    "content": [{"type": "text", "text": "NATIVE-OUT-CANARY"}],
+                                    "usage": {"input_tokens": 10, "output_tokens": 7}}}),
+            json.dumps({"type": "cost-state", "sessionId": "sess-native-1",
+                        "timestamp": "2026-10-03T04:02:00.000Z",
+                        "modelUsage": {"claude-opus-5-5": {"costUSD": 1.25}}}),
+        ]) + "\n", encoding="utf-8")
+        panel._save_run(self.root, {"id": "run_T1_native", "task_id": "T1",
+            "role": "insight-executor", "runtime": "claude", "status": "running", "pid": 8888,
+            "started_at": "2026-10-03T04:00:00+00:00",
+            "cost": {"usd": None, "quality": "unknown", "provenance": "нет источника"},
+            "events": []})
+        with patch.object(panel, "NATIVE_HOME", home), \
+             patch.object(panel, "process_alive", return_value=True):
+            loaded = panel._get_run(self.root, "run_T1_native")
+        self.assertEqual(loaded["native"]["session_id"], "sess-native-1")
+        native_events = [e for e in loaded["events"]
+                         if isinstance(e.get("data"), dict) and e["data"].get("quality") == "native"]
+        kinds = [e["data"].get("native_type") for e in native_events]
+        self.assertEqual(kinds, ["session_linked", "user", "assistant", "cost-state"])
+        for event in native_events:
+            self.assertEqual(event["data"].get("provenance", str(session)), str(session))
+        # Стоимость — фактическая из файла сессии, с качеством reported и provenance.
+        self.assertEqual(loaded["cost"]["usd"], 1.25)
+        self.assertEqual(loaded["cost"]["quality"], "reported")
+        self.assertEqual(loaded["cost"]["provenance"], str(session))
+        # Текст prompt/вывода из нативного журнала не попадает в запись.
+        self.assertNotIn("CANARY", json.dumps(loaded, ensure_ascii=False))
+        # Повторное чтение не дублирует события (курсор по строкам).
+        with patch.object(panel, "NATIVE_HOME", home), \
+             patch.object(panel, "process_alive", return_value=True):
+            again = panel._get_run(self.root, "run_T1_native")
+        self.assertEqual(len(again["events"]), len(loaded["events"]))
+
+    def test_ambiguous_native_sessions_keep_launcher_fallback(self):
+        home = Path(self.temp.name) / "fake-home-2"
+        slug = panel.native_sessions.claude_project_slug(str(self.root))
+        project = home / ".claude" / "projects" / slug
+        project.mkdir(parents=True)
+        for name in ("a", "b"):
+            (project / f"sess-{name}.jsonl").write_text(json.dumps({
+                "type": "queue-operation", "sessionId": f"sess-{name}",
+                "timestamp": "2026-10-03T04:00:05.000Z"}) + "\n", encoding="utf-8")
+        panel._save_run(self.root, {"id": "run_T1_ambig", "task_id": "T1",
+            "role": "insight-executor", "runtime": "claude", "status": "running", "pid": 8889,
+            "started_at": "2026-10-03T04:00:00+00:00",
+            "cost": {"usd": None, "quality": "unknown", "provenance": "нет источника"},
+            "events": []})
+        with patch.object(panel, "NATIVE_HOME", home), \
+             patch.object(panel, "process_alive", return_value=True):
+            loaded = panel._get_run(self.root, "run_T1_ambig")
+        # Двусмысленная привязка не угадывается: события и стоимость остаются фолбэком.
+        self.assertNotIn("native", loaded)
+        self.assertEqual(loaded["cost"]["quality"], "unknown")
+
+    def test_alive_worktree_run_extends_lease_heartbeat(self):
+        from src.worktree_lease import heartbeat as real_heartbeat  # noqa: F401
+        lease_dir = self.root / "data" / "worktree-leases"
+        lease_dir.mkdir(parents=True)
+        (lease_dir / "T1.json").write_text(json.dumps({
+            "schema_version": 1, "task_id": "T1", "run_id": "run_T1_beat",
+            "worktree": "C:/x", "branch": "agent/run_T1_beat", "base_commit": "abc",
+            "state": "active", "created_at": "2026-10-03T04:00:00+00:00",
+            "heartbeat_at": "2026-10-03T04:00:00+00:00"}), encoding="utf-8")
+        panel._save_run(self.root, {"id": "run_T1_beat", "task_id": "T1",
+            "role": "insight-executor", "runtime": "codex", "status": "running", "pid": 9001,
+            "workspace": "worktree",
+            "lease": {"task_id": "T1", "run_id": "run_T1_beat", "worktree": "C:/x",
+                      "branch": "agent/run_T1_beat", "base_commit": "abc", "state": "active",
+                      "heartbeat_at": "2026-10-03T04:00:00+00:00"},
+            "events": []})
+        with patch.object(panel, "process_alive", return_value=True):
+            loaded = panel._get_run(self.root, "run_T1_beat")
+        stored = json.loads((lease_dir / "T1.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(stored["heartbeat_at"], "2026-10-03T04:00:00+00:00")
+        self.assertEqual(loaded["lease"]["heartbeat_at"], stored["heartbeat_at"])
+        # Мёртвый процесс heartbeat не продлевает: lease честно стареет.
+        with patch.object(panel, "process_alive", return_value=False):
+            panel._get_run(self.root, "run_T1_beat")
+        after_dead = json.loads((lease_dir / "T1.json").read_text(encoding="utf-8"))
+        self.assertEqual(after_dead["heartbeat_at"], stored["heartbeat_at"])
 
     def test_run_cancel_never_kills_unverified_pid(self):
         run = {"id": "run_T1_test", "runtime": "codex", "task_id": "T1",
@@ -419,7 +643,8 @@ class HttpTests(unittest.TestCase):
                                       b'{"task_id":"T1","role":"insight-executor","agent":"codex"}', headers)
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["run"]["id"], "run_T1_http")
-        start_mock.assert_called_once_with(self.root, "T1", "insight-executor", "codex", idempotency_key=None, model=None)
+        start_mock.assert_called_once_with(self.root, "T1", "insight-executor", "codex",
+                                           idempotency_key=None, model=None, workspace="checkout")
 
         # Get run by ID
         with patch.object(panel, "_get_run", return_value=fake_run):
@@ -434,6 +659,20 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["ok"])
         cancel_mock.assert_called_once_with(self.root, "run_T1_http")
+
+    def test_steer_http_returns_unsupported_without_capability(self):
+        panel._save_run(self.root, {"id": "run_T1_http_steer", "task_id": "T1",
+            "runtime": "codex", "status": "running", "events": []})
+        headers = {"X-Control-Token": "test-secret", "Content-Type": "application/json"}
+        self.assertEqual(self.request("POST", "/api/run/steer", b'{"text":"x"}')[0], 403)
+        code, body = self.request("POST", "/api/run/steer",
+                                  b'{"run_id":"run_T1_http_steer","text":"pause"}', headers)
+        self.assertEqual(code, 400)
+        payload = json.loads(body)
+        self.assertEqual(payload["error"], "unsupported")
+        self.assertEqual(self.request("POST", "/api/run/steer", b'{"text":"x"}', headers)[0], 400)
+        self.assertEqual(self.request("POST", "/api/run/steer",
+                                      b'{"run_id":"run_missing_x","text":"x"}', headers)[0], 404)
 
     def test_runs_http_includes_muse_without_prompt_or_output(self):
         outbox = self.root / "ops" / "delegations" / "outbox"

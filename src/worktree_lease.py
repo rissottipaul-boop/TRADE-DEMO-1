@@ -88,7 +88,7 @@ def prepare_worktree(root: Path, task_id: str, run_id: str,
     return record
 
 
-def heartbeat(root: Path, task_id: str, run_id: str) -> dict:
+def heartbeat(root: Path, task_id: str, run_id: str, min_interval_s: float = 0) -> dict:
     path = _lease_path(root.resolve(), task_id)
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -96,7 +96,39 @@ def heartbeat(root: Path, task_id: str, run_id: str) -> dict:
         raise LeaseError("Lease недоступен; требуется сверка") from exc
     if record.get("run_id") != run_id or record.get("state") != "active":
         raise LeaseError("Lease принадлежит другому запуску или не активен")
+    if min_interval_s:
+        # Троттлинг для периодических опросов панели: свежий heartbeat не перезаписывается.
+        try:
+            beat = datetime.fromisoformat(record["heartbeat_at"])
+            if beat.tzinfo is not None and \
+                    (datetime.now(timezone.utc) - beat).total_seconds() < min_interval_s:
+                return record
+        except (KeyError, TypeError, ValueError):
+            pass
     record["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+    _write(path, record)
+    return record
+
+
+def release_lease(root: Path, task_id: str, run_id: str, state: str = "released") -> dict:
+    """Помечает lease завершённым; worktree и ветка остаются для ручной сверки diff.
+
+    Каталог и ветка не удаляются: принятие результата — отдельное решение
+    после проверки изменений. Освобождение чужого lease запрещено.
+    """
+    if state not in ("released", "unknown"):
+        raise ValueError("Недопустимое состояние освобождения lease")
+    path = _lease_path(root.resolve(), task_id)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LeaseError("Lease недоступен; требуется сверка") from exc
+    if not isinstance(record, dict) or record.get("run_id") != run_id:
+        raise LeaseError("Lease принадлежит другому запуску")
+    if record.get("state") not in ("active", "provisioning", "unknown"):
+        return record
+    record["state"] = state
+    record["released_at"] = datetime.now(timezone.utc).isoformat()
     _write(path, record)
     return record
 
@@ -123,7 +155,7 @@ def inspect_leases(root: Path, stale_after_s: int = 300) -> list[dict]:
                 continue
             item = {key: record.get(key) for key in
                     ("task_id", "run_id", "worktree", "branch", "base_commit",
-                     "state", "created_at", "heartbeat_at")}
+                     "state", "created_at", "heartbeat_at", "released_at")}
             item["registered"] = Path(worktree).resolve() in registered
             item["owner_verified"] = False
             try:

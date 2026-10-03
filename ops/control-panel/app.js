@@ -108,7 +108,9 @@ function renderRuns(s){
     const metrics=[];
     if(r.elapsed_s!=null)metrics.push("Время: "+Math.round(r.elapsed_s)+" с");
     if(r.exit_code!=null)metrics.push("Код выхода: "+r.exit_code);
-    metrics.push("Стоимость: "+(r.cost?.usd==null?"нет данных":r.cost.usd+" USD"));
+    if(r.result_quality==="exit-code-only")metrics.push("Итог: по коду выхода · критерий доски не подтверждён");
+    if(r.workspace==="worktree")metrics.push("Изолированный worktree");
+    metrics.push("Стоимость: "+(r.cost?.usd==null?"нет данных":r.cost.usd+" USD")+" ("+(r.cost?.quality||"unknown")+")");
     left.append(node("small","",metrics.join(" · ")));
     const pillCls=["completed","done"].includes(r.status)?"good":
       ["unknown","failed","error","timeout"].includes(r.status)?"bad":"";

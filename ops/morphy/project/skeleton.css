@@ -1,0 +1,29 @@
+/* Скелетоны: мягкое мерцание; при prefers-reduced-motion — статичный брусок. */
+.pj-skel {
+  display: block;
+  max-width: 100%;
+  border-radius: var(--pj-r-xs);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.1) 40%, rgba(255, 255, 255, 0.05) 80%);
+  background-size: 300% 100%;
+  animation: pj-skel-shimmer var(--pj-dur-slow) ease-in-out infinite;
+}
+.pj-skel-text { display: flex; flex-direction: column; width: 100%; }
+.pj-skel-card,
+.pj-skel-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pj-sp-3);
+  padding: var(--pj-sp-5);
+  border-radius: var(--pj-r-lg);
+  border: 1px solid var(--pj-line);
+  background: var(--pj-surface-1);
+  min-width: 0;
+}
+.pj-skel-panel { gap: var(--pj-sp-3); }
+@keyframes pj-skel-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pj-skel { animation: none; background: rgba(255, 255, 255, 0.07); }
+}

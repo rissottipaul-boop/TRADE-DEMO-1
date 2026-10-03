@@ -1,10 +1,64 @@
 # Morphy: локальная проверка для общего пульта OKX-проекта
 
-**Статус:** локальный smoke пройден; AI настроен человеком; read-only экран проекта установлен. Авторизованный экран подтверждён в Opera после входа человека (запись в `MORPHY-VERIFY-LOGIN`); мобильная ширина не проверена. `MORPHY-PROJECT-VIEW` закрыта 03.10 07:42. Guard проекта подключён к AI-агенту Morphy (`MORPHY-GUARD-WIRE`, 03.10 09:10); harness Codex (provider `openai`) мостом не покрыт.
+**Статус:** локальный smoke пройден; AI настроен человеком; read-only экран проекта установлен. Авторизованный экран подтверждён в Opera после входа человека (запись в `MORPHY-VERIFY-LOGIN`); мобильная ширина не проверена. `MORPHY-PROJECT-VIEW` закрыта 03.10 07:42. Guard проекта подключён ко всем трём harness AI-агента Morphy: claude и pi (`MORPHY-GUARD-WIRE`, 03.10 09:10), codex/app-server (`MORPHY-GUARD-CODEX`, 03.10 09:20).
 **Дата:** 03.10.2026, Asia/Qyzylorda (+05:00).
 **Исполнитель:** Insight Executor / Codex.
 
 ## Результат
+
+### Guard покрыл harness Codex (MORPHY-GUARD-CODEX, 03.10 09:20)
+
+Остаток предыдущей задачи закрыт покрытием самого harness, без правки периметра
+и без варианта «блокировать непокрытый провайдер». Harness Codex исполняет
+инструменты внутри подпроцесса `codex app-server` (JSON-RPC по stdio), поэтому
+горловины вида `executeTool` у него нет. Штатная точка — approval-запросы
+протокола, которые сервер шлёт клиенту и ждёт ответа: legacy
+`execCommandApproval`/`applyPatchApproval` (ReviewDecision) и v2
+`item/commandExecution|fileChange/requestApproval`
+(CommandExecution/FileChangeApprovalDecision). До патча Morphy отключал их
+(`approvalPolicy: 'never'` в обоих `thread/start`-сайтах) и авто-принимал
+for-session на случай edge-запроса.
+
+Сделано в [`ops/morphy/guard-hook.mjs`](../ops/morphy/guard-hook.mjs) и
+[`ops/morphy/deploy-guard.ps1`](../ops/morphy/deploy-guard.ps1):
+
+- `approvalPolicy: 'never'` → `'untrusted'` в обоих сайтах (живые разговоры и
+  one-shot/agent-api) — approval-запросы начинают приходить; sandbox Morphy
+  не менялся;
+- авто-accept заменён решением guard `codexGuardDecision(method, params)`:
+  команда → `Bash {command}`, патч → `Write {file_path}` по каждому пути —
+  через тот же `guard_adapter --client claude`;
+- allow — одноразовый `accept`/`approved`, НЕ `*ForSession`/`*_for_session`:
+  каждый следующий вызов снова проходит guard;
+- нераспознанная форма approval (нет текста команды / путей) — отказ в сторону
+  безопасности с причиной в логе supervisor; сбой адаптера — fail-open по
+  контракту guard, как у остальных клиентов.
+
+Проверено фактически:
+
+- `node ops/morphy/guard-hook.test.mjs` — **10/10**: прежние 6 плюс Codex-кейсы:
+  legacy-канарейка `denied`/контроль `approved` (одноразово), v2-канарейка
+  `decline`/контроль `accept`, `applyPatchApproval` в `.github/hooks/` —
+  `denied`, нераспознанные формы — отказ. Тест гоняет задеплоенную копию моста.
+- `deploy-guard.ps1` дважды — идемпотентен; в `codex.ts` 2 сайта `'untrusted'`,
+  авто-accept удалён.
+- Патченный `codex.ts` компилируется и импортируется tsx
+  (`node --import tsx/esm -e "await import('./supervisor/harnesses/codex.ts')"`
+  — ok) и входит в статическую цепочку импортов supervisor
+  (`index.ts → bloby-agent.ts → codex.ts`); после `trial.ps1 stop/start` health
+  `/api/health` и `/app/api/health` — 200, ошибок загрузки в логах нет.
+
+Остаток: живой прогон с provider `openai` не выполнялся — переключение
+провайдера Morphy это настройка аккаунта человека (§2), а промпт живой модели —
+расход квоты и отправка данных во внешний сервис. Факт отправки approval-запросов
+установленным `codex` CLI при `approvalPolicy: 'untrusted'` — документированное
+поведение app-server, подтверждённое кодом harness (комментарий upstream: «None
+of these fire under approvalPolicy:'never'», т.е. при иной политике они
+приходят), но не живой сессией. Если человек переключит провайдера на openai,
+достаточно прогнать промпт-канарейки из `insights/guard-compat.md` в чате Morphy;
+отказ будет виден как `[codex-rpc] guard denied … [guard] …` в логе supervisor и
+`deny` в `data/guard.log`. Конфиг, пароль и ключи Morphy не читались и не
+менялись (провайдер проверялся только по `/api/onboard/status`, без секретов).
 
 ### Guard подключён к AI-агенту Morphy (MORPHY-GUARD-WIRE, 03.10 09:10)
 
@@ -52,12 +106,10 @@ pulse/cron/customer, agent-API) и `pi/session.ts` (pre-check `piGuardDeny`).
 
 Ограничения и остаток:
 
-- **Harness Codex не покрыт.** Provider `openai` идёт через Codex app-server
-  (`supervisor/harnesses/codex.ts`) — отдельный протокол без `Options.hooks`;
-  при переключении человеком провайдера на openai guard на действия Morphy не
-  действует. На момент проверки `/api/onboard/status` показывал
-  `provider=anthropic` (человек сменил с openai) — активный harness покрыт.
-  Покрытие codex-harness — отдельная задача.
+- **Harness Codex** (provider `openai`, Codex app-server,
+  `supervisor/harnesses/codex.ts`) на момент этой задачи покрыт не был;
+  закрыто следующей задачей — см. раздел «Guard покрыл harness Codex
+  (MORPHY-GUARD-CODEX)» выше.
 - E2E с живой моделью (промпт из guard-compat через чат Morphy) не выполнялся:
   это отправка данных во внешний AI-сервис и расход квоты человека — за рамками
   ограничений задачи. Канарейки прогнаны через задеплоенный мост на реальном

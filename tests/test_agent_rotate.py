@@ -240,6 +240,22 @@ class AgentRotateTests(unittest.TestCase):
                 self.assertEqual([line["event"] for line in result.logs], ["start", "finish"])
                 self.assertNotIn(prompt, json.dumps(result.logs, ensure_ascii=False))
 
+    def test_run_id_is_logged_for_panel_correlation_without_prompt_leak(self):
+        result = self.run_launcher(Agent="codex", Model="test-model", Headless=True,
+                                   RunId="run_T42_1_abcd")
+        self.assertEqual(result.code, 0, result.stderr)
+        self.assertEqual([line.get("run_id") for line in result.logs],
+                         ["run_T42_1_abcd", "run_T42_1_abcd"])
+        # Корреляционный ID не попадает в аргументы и prompt клиента.
+        self.assertNotIn("run_T42_1_abcd", json.dumps(result.calls))
+        without = self.run_launcher(Agent="codex", Model="test-model", Headless=True)
+        self.assertEqual([line.get("run_id") for line in without.logs], [None, None])
+        bad = self.run_launcher(Plan=True, RunId="../evil; rm")
+        self.assertNotEqual(bad.code, 0)
+        self.assertIn("Invalid -RunId", bad.stderr)
+        self.assertEqual(bad.calls, [])
+        self.assertFalse(bad.log_directory)
+
     def test_failure_never_replays_prompt_and_preserves_exit_code(self):
         for code, message in [(23, "authentication failed"), (41, "guard denied"), (75, "rate limit quota exhausted")]:
             with self.subTest(code=code):

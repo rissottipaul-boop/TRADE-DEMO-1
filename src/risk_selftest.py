@@ -7,6 +7,7 @@
 2. size_position: BTC, equity 10000, риск 1%, вход 84000, стоп 82000.
 3. record_pnl с убытком -6% -> дневной breaker блокирует check_entry_allowed;
    equity record_pnl не меняет — её приносит update_equity по балансу (RISK-PNL-DOUBLE).
+8. record_pnl с funding: funding меняет day_pnl и серии убытков, а не equity.
 4. trip_breaker(global) блокирует всё до reset_breaker('global').
 5. Три убытка подряд по инструменту -> block_instrument (cooldown 24ч).
 6. Состояние переживает рестарт (re-init на том же файле БД).
@@ -155,6 +156,25 @@ def main() -> None:
     check("7c. свежий update_equity снимает запрет", allowed, reason)
     risk.init(TEST_DB)  # отпустить временную БД сценария 7
     TEST_FEED_DB.unlink(missing_ok=True)
+
+    # --- 8. Funding SWAP: меняет day_pnl и серии, а не equity (RISK-FUNDING-PNL) ---
+    before = risk.status()
+    risk.record_pnl("XRP-USDT-SWAP", -5.0, now, funding=8.0)  # итог +3.0
+    st = risk.status()
+    check("8a. funding перекрыл убыток: day_pnl вырос ровно на +3",
+          abs(st["day_pnl"] - before["day_pnl"] - 3.0) < 1e-9, str(st["day_pnl"]))
+    check("8b. итог положительный — глобальная серия сброшена",
+          st["global_loss_streak"] == 0, str(st["global_loss_streak"]))
+    check("8c. equity не изменилась от funding",
+          abs(st["equity"] - before["equity"]) < 1e-9, str(st["equity"]))
+    risk.record_pnl("XRP-USDT-SWAP", 2.0, now, funding=-5.0)  # итог -3.0
+    st2 = risk.status()
+    check("8d. отрицательный funding дал убыток: day_pnl упал ровно на 3",
+          abs(st2["day_pnl"] - st["day_pnl"] + 3.0) < 1e-9, str(st2["day_pnl"]))
+    check("8e. серия убытков выросла до 1",
+          st2["global_loss_streak"] == 1, str(st2["global_loss_streak"]))
+    check("8f. equity снова не изменилась",
+          abs(st2["equity"] - st["equity"]) < 1e-9, str(st2["equity"]))
 
     print(f"\nSELF-TEST PASSED: {_passed} проверок")
 

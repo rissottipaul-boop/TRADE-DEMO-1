@@ -20,24 +20,28 @@ import subprocess
 import threading
 from urllib.parse import parse_qs, urlsplit
 
+from src import native_sessions
 from src.agent_context import build_context, dependencies, new_decisions, read_rows
 from src.engine_watchdog import Paths, decide, gather
 from src.netdata_monitor import check_netdata_health
 from src.obsidian_status import build_snapshot, process_alive
-from src.worktree_lease import inspect_leases
+from src.worktree_lease import (LeaseError, heartbeat, inspect_leases,
+                                prepare_worktree, release_lease)
 from ops.hooks.autopilot import parse_board, ready_tasks
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "ops" / "control-panel"
+# Домашний каталог с состоянием CLI (патчится в тестах); ключи оттуда не читаются.
+NATIVE_HOME = Path.home()
 MAX_BODY = 4096
 MAX_JSON = 256 * 1024
 MAX_LOG_BYTES = 16 * 1024
 ALLOWED_ACTIONS = {"engine.start", "engine.stop", "delegation.pause", "delegation.stop"}
 RUNTIMES_CAPABILITIES = {
-    "codex": ["start", "status"],
-    "claude": ["start", "status"],
-    "gemini": ["start", "status"],
+    "codex": ["start", "status", "events"],
+    "claude": ["start", "status", "events"],
+    "gemini": ["start", "status", "events"],
     "muse": ["start", "status", "events"],
 }
 
@@ -45,6 +49,22 @@ RUNTIMES_CAPABILITIES = {
 def runtime_capabilities(root: Path = ROOT) -> dict[str, list[str]]:
     return {name: [cap for cap in caps if cap != "start" or _guard_launch_ready(root, name)]
             for name, caps in RUNTIMES_CAPABILITIES.items()}
+
+
+def capabilities_provenance() -> dict:
+    """Откуда взята матрица и чем подтверждён start; steer/cancel не заявлены."""
+    return {
+        "matrix": "статическая матрица адаптеров src/control_panel.py; "
+                  "steer/cancel/resume не заявлены: протокол сессий клиентов не подтверждён",
+        "start_gate": ["ops/agent-routing.json: guard_status == e2e-verified",
+                       "ops/hooks/launch-e2e.json: clients.<agent>.verified == true"],
+        "events_source": "data/runs/<id>.json; Claude/Codex — нативные журналы сессий "
+                         "(~/.claude/projects, ~/.codex/sessions) при однозначной привязке, "
+                         "иначе и для Gemini/Muse — журнал лаунчера logs/agent-rotate.log",
+        "cost_source": "Claude — cost-state.modelUsage.costUSD из файла сессии (reported); "
+                       "Codex — только токены, стоимости в журнале нет; "
+                       "Gemini/Muse — источника нет (unknown)",
+    }
 
 
 def _guard_launch_ready(root: Path, agent: str) -> bool:
@@ -404,6 +424,159 @@ def _save_run(root: Path, run: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _append_event(run: dict, event_type: str, ts: str | None, data: dict) -> None:
+    events = run.setdefault("events", [])
+    events.append({"cursor": len(events) + 1,
+                   "ts": ts or datetime.now(timezone.utc).isoformat(),
+                   "type": event_type, "data": data})
+
+
+def _release_run_lease(root: Path, run: dict, state: str = "released") -> None:
+    """Освобождает lease завершённого run; worktree остаётся для сверки diff."""
+    lease = run.get("lease")
+    if not isinstance(lease, dict) or lease.get("state") not in ("active", "provisioning"):
+        return
+    try:
+        released = release_lease(root, str(lease.get("task_id")), run["id"], state=state)
+        run["lease"] = {key: released.get(key) for key in
+                        ("task_id", "run_id", "worktree", "branch", "base_commit",
+                         "state", "released_at")}
+    except (LeaseError, ValueError, TypeError) as exc:
+        lease["state"] = "release-failed"
+        lease["release_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _ingest_rotation_events(root: Path, run: dict) -> bool:
+    """Переносит события лаунчера с run_id запуска в локальную запись.
+
+    Источник — журнал ротации (для worktree-запусков — журнал внутри worktree).
+    'finish' делает статус терминальным по коду выхода; это качество
+    "exit-code-only": код выхода сам по себе не подтверждает критерий доски.
+    """
+    log_ref = run.get("rotation_log")
+    log_path = Path(log_ref) if isinstance(log_ref, str) and log_ref else root / "logs" / "agent-rotate.log"
+    seen = {(event.get("data") or {}).get("source_ts")
+            for event in run.get("events", []) if isinstance(event, dict)
+            and isinstance(event.get("data"), dict)}
+    changed = False
+    for line in _tail(log_path, 256 * 1024, 4000):
+        try:
+            entry = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict) or entry.get("run_id") != run.get("id"):
+            continue
+        ts = entry.get("ts") if isinstance(entry.get("ts"), str) else None
+        if ts in seen:
+            continue
+        name = entry.get("event")
+        code = entry.get("exit_code") if isinstance(entry.get("exit_code"), int) else None
+        provenance = log_path.as_posix() if log_ref else "logs/agent-rotate.log"
+        data = {"source_ts": ts, "launcher_event": name, "exit_code": code,
+                "provenance": provenance}
+        if name == "start":
+            _append_event(run, "run.progress", ts, data)
+            changed = True
+        elif name == "finish":
+            event_type = "run.completed" if code == 0 else "run.failed"
+            _append_event(run, event_type, ts, data)
+            run["status"] = "completed" if code == 0 else "failed"
+            run["exit_code"] = code
+            run["finished_at"] = ts or datetime.now(timezone.utc).isoformat()
+            # Код выхода — не доказательство выполненного критерия доски.
+            run["result_quality"] = "exit-code-only"
+            _release_run_lease(root, run)
+            changed = True
+    return changed
+
+
+def _ingest_native_events(root: Path, run: dict) -> bool:
+    """События и стоимость из нативного журнала сессии клиента (Claude/Codex).
+
+    Привязка только при единственном кандидате по cwd и окну времени; иначе
+    запись остаётся на фолбэке журнала лаунчера. Текст сообщений не копируется.
+    """
+    runtime = run.get("runtime")
+    if runtime not in ("claude", "codex"):
+        return False
+    native = run.get("native")
+    if isinstance(native, dict) and native.get("finalized"):
+        return False
+    changed = False
+    if not isinstance(native, dict) or not native.get("path"):
+        lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
+        workdir = lease.get("worktree") or str(root)
+        try:
+            link = native_sessions.find_session(NATIVE_HOME, runtime, workdir,
+                                                run.get("started_at") or "",
+                                                run.get("finished_at"))
+        except Exception:
+            link = None
+        if not link:
+            return False
+        native = {"client": link["client"], "session_id": link["session_id"],
+                  "path": link["path"], "cursor": 0, "finalized": False}
+        run["native"] = native
+        _append_event(run, "run.progress", None,
+                      {"native_type": "session_linked", "quality": "native",
+                       "session_id": link["session_id"], "provenance": link["path"]})
+        changed = True
+    try:
+        result = native_sessions.ingest(native["client"], native["path"],
+                                        native.get("cursor") or 0)
+    except Exception:
+        return changed
+    if result["cursor"] != native.get("cursor"):
+        native["cursor"] = result["cursor"]
+        changed = True
+    native_count = sum(1 for event in run.get("events", [])
+                       if isinstance(event, dict) and isinstance(event.get("data"), dict)
+                       and event["data"].get("quality") == "native")
+    for event in result.get("events", []):
+        if native_count >= native_sessions.MAX_EVENTS_PER_RUN:
+            if not native.get("truncated"):
+                native["truncated"] = True
+                _append_event(run, "run.progress", None,
+                              {"native_type": "native_truncated", "quality": "native",
+                               "detail": "Достигнут предел нативных событий записи; "
+                                         "полный журнал — в файле сессии",
+                               "provenance": native["path"]})
+                changed = True
+            break
+        _append_event(run, event["type"], event.get("ts"),
+                      {**event["data"], "quality": "native", "provenance": native["path"]})
+        native_count += 1
+        changed = True
+    cost = result.get("cost")
+    if isinstance(cost, dict) and isinstance(cost.get("usd"), (int, float)):
+        run["cost"] = {"usd": cost["usd"], "quality": "reported",
+                       "models": cost.get("models"), "provenance": native["path"]}
+        changed = True
+    tokens = result.get("tokens")
+    if isinstance(tokens, dict) and tokens:
+        run["tokens"] = {**tokens, "quality": "reported", "provenance": native["path"]}
+        changed = True
+    if run.get("status") in ("completed", "failed", "cancelled"):
+        native["finalized"] = True
+        changed = True
+    return changed
+
+
+def _heartbeat_run_lease(root: Path, run: dict) -> bool:
+    """Продлевает heartbeat активного lease, пока процесс запуска жив."""
+    lease = run.get("lease")
+    if not isinstance(lease, dict) or lease.get("state") != "active":
+        return False
+    try:
+        record = heartbeat(root, str(lease.get("task_id")), run["id"], min_interval_s=60)
+    except (LeaseError, ValueError):
+        return False
+    if record.get("heartbeat_at") != lease.get("heartbeat_at"):
+        lease["heartbeat_at"] = record.get("heartbeat_at")
+        return True
+    return False
+
+
 def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
     if not run_id or not re.fullmatch(r"run_[A-Za-z0-9_-]{1,80}", run_id):
         return None
@@ -413,6 +586,12 @@ def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
     run = _read_json(path)
     if not isinstance(run, dict) or run.get("id") != run_id:
         return None
+    changed = False
+    if check_alive and run.get("status") in ("running", "unknown"):
+        # Recovery: журнал лаунчера может подтвердить итог и после рестарта панели.
+        changed = _ingest_rotation_events(root, run)
+        # Нативный журнал сессии дополняет события и стоимость с provenance.
+        changed = _ingest_native_events(root, run) or changed
     if check_alive and run.get("status") == "running" and run.get("pid"):
         pid = run["pid"]
         alive = False
@@ -424,14 +603,13 @@ def _get_run(root: Path, run_id: str, check_alive: bool = True) -> dict | None:
             now = datetime.now(timezone.utc).isoformat()
             run["status"] = "unknown"
             run["finished_at"] = now
-            events = run.setdefault("events", [])
-            events.append({
-                "cursor": len(events) + 1,
-                "ts": now,
-                "type": "run.unconfirmed",
-                "data": {"reason": "Процесс не найден; итог исполнения требуется сверить"},
-            })
-            _save_run(root, run)
+            _append_event(run, "run.unconfirmed", now,
+                          {"reason": "Процесс не найден; итог исполнения требуется сверить"})
+            changed = True
+        else:
+            changed = _heartbeat_run_lease(root, run) or changed
+    if changed:
+        _save_run(root, run)
     return run
 
 
@@ -454,7 +632,8 @@ def _observed_runs(root: Path, limit: int = 50) -> list[dict]:
         # остаются в /api/run/events, а не попадают в общий снимок панели.
         visible = {key: run.get(key) for key in (
             "id", "task_id", "role", "runtime", "model", "status", "pid",
-            "started_at", "finished_at", "exit_code", "cost", "provenance")}
+            "started_at", "finished_at", "exit_code", "cost", "provenance",
+            "workspace", "result_quality", "tokens")}
         records.append({**visible, "source_kind": "panel", "managed": True,
                         "state_quality": "pid-only" if run.get("status") == "running" else "local-record"})
     for job in _queue(root)["jobs"]:
@@ -488,23 +667,30 @@ def _run_events(root: Path, run_id: str, after: int = 0, limit: int = 100) -> di
             "status": run.get("status"), "provenance": run.get("provenance")}
 
 
-def _spawn_agent_process(root: Path, agent: str, role: str, task_id: str, model: str | None = None) -> int:
-    script = root / "ops" / "agent-rotate.ps1"
+def _spawn_agent_process(root: Path, agent: str, role: str, task_id: str, model: str | None = None,
+                         run_id: str | None = None, workdir: Path | None = None) -> int:
+    base = Path(workdir) if workdir else root
+    script = base / "ops" / "agent-rotate.ps1"
     if not script.is_file():
         raise RuntimeError("Не найден agent-rotate.ps1")
     command = [_pwsh(), "-NoProfile", "-File", str(script), "-Agent", agent, "-Role", role, "-TaskId", task_id, "-Headless"]
     if model:
         command.extend(["-Model", model])
+    if run_id:
+        command.extend(["-RunId", run_id])
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    proc = subprocess.Popen(command, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+    proc = subprocess.Popen(command, cwd=base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
     return proc.pid
 
 
 def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
-               idempotency_key: str | None = None, model: str | None = None) -> dict:
+               idempotency_key: str | None = None, model: str | None = None,
+               workspace: str = "checkout") -> dict:
     if idempotency_key is not None and (not isinstance(idempotency_key, str) or
             not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", idempotency_key)):
         raise ValueError("Неверный idempotency_key")
+    if workspace not in ("checkout", "worktree"):
+        raise ValueError("Неверный workspace: допустимы checkout и worktree")
     task = _task_detail(root, task_id)
     if not task.get("eligible"):
         raise ValueError(f"Задача {task_id} не готова к запуску")
@@ -544,10 +730,30 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
     plan = _agent_plan(root, task_id, role, agent)
     if not plan.get("launch_enabled") or plan.get("selected") != agent:
         raise ValueError("Запуск недоступен: " + str(plan.get("reason") or "guard/CLI не проверены"))
-    pid = _spawn_agent_process(root, agent, role, task_id, model=model)
     now = datetime.now(timezone.utc).isoformat()
     rand_suffix = secrets.token_hex(4)
     run_id = f"run_{task_id}_{int(datetime.now(timezone.utc).timestamp())}_{rand_suffix}"
+    lease = None
+    workdir = None
+    if workspace == "worktree":
+        # Пишущий запуск получает изолированный checkout; занятая задача — отказ.
+        try:
+            lease = prepare_worktree(root, task_id, run_id)
+        except LeaseError as exc:
+            raise ValueError(f"Worktree lease недоступен: {exc}") from exc
+        workdir = Path(lease["worktree"])
+    try:
+        pid = _spawn_agent_process(root, agent, role, task_id, model=model,
+                                   run_id=run_id, workdir=workdir)
+    except Exception:
+        if lease:
+            try:
+                release_lease(root, task_id, run_id, state="unknown")
+            except (LeaseError, ValueError):
+                pass
+        raise
+    rotation_log = ((workdir / "logs" / "agent-rotate.log").as_posix()
+                    if workdir else "logs/agent-rotate.log")
     run = {
         "id": run_id,
         "task_id": task_id,
@@ -560,15 +766,25 @@ def _start_run(root: Path, task_id: str, role: str, agent: str = "auto",
         "started_at": now,
         "finished_at": None,
         "exit_code": None,
+        "workspace": workspace,
+        "lease": ({key: lease.get(key) for key in
+                   ("task_id", "run_id", "worktree", "branch", "base_commit", "state")}
+                  if lease else None),
+        "rotation_log": rotation_log,
         "events": [
             {
                 "cursor": 1,
                 "ts": now,
                 "type": "run.started",
-                "data": {"task_id": task_id, "role": role, "runtime": agent, "pid": pid},
+                "data": {"task_id": task_id, "role": role, "runtime": agent, "pid": pid,
+                         "workspace": workspace,
+                         "worktree": lease["worktree"] if lease else None},
             }
         ],
-        "cost": {"usd": None, "quality": "unknown"},
+        # Стоимость — вычисляемая проекция; источника данных пока нет, и это фиксируется явно.
+        "cost": {"usd": None, "quality": "unknown",
+                 "provenance": "клиент не сообщает стоимость; журнал " + rotation_log +
+                               " содержит только события start/finish"},
         "provenance": f"data/runs/{run_id}.json",
     }
     _save_run(root, run)
@@ -579,10 +795,30 @@ def _cancel_run(root: Path, run_id: str) -> dict:
     run = _get_run(root, run_id, check_alive=True)
     if not run:
         raise ValueError(f"Запуск {run_id} не найден")
+    caps = runtime_capabilities(root).get(run.get("runtime"), [])
+    if "cancel" not in caps:
+        return {"ok": False, "error": "unsupported",
+                "detail": "Клиент не заявил поддержку cancel: отмена ждёт протокол сессии "
+                          "и подтверждение конечного состояния; PID не завершался",
+                "run": run}
+    # Ни один адаптер пока не подтвердил cancel; ветка станет достижимой
+    # только после включения capability в матрице с доказательством.
+    raise RuntimeError("Подтверждённый протокол отмены не подключён")
 
-    return {"ok": False, "error": "unsupported",
-            "detail": "Отмена ждёт идентификатор сессии и подтверждение клиента; PID не завершался",
-            "run": run}
+
+def _steer_run(root: Path, run_id: str, text: str) -> dict:
+    if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+        raise ValueError("Неверная инструкция steer")
+    run = _get_run(root, run_id, check_alive=True)
+    if not run:
+        raise ValueError(f"Запуск {run_id} не найден")
+    caps = runtime_capabilities(root).get(run.get("runtime"), [])
+    if "steer" not in caps:
+        return {"ok": False, "error": "unsupported",
+                "detail": "Клиент не заявил поддержку steer: передача инструкции требует "
+                          "подтверждённый протокол сессии; инструкция не сохранялась",
+                "run": run}
+    raise RuntimeError("Подтверждённый протокол steer не подключён")
 
 
 def state(root: Path = ROOT) -> dict:
@@ -736,7 +972,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as exc:
                 return self._json(400, {"error": str(exc)})
         if parsed.path == "/api/capabilities":
-            return self._json(200, {"capabilities": runtime_capabilities(self.server.root)})
+            return self._json(200, {"capabilities": runtime_capabilities(self.server.root),
+                                    "provenance": capabilities_provenance()})
         if parsed.path == "/api/runs":
             return self._json(200, {"runs": _observed_runs(self.server.root)})
         if parsed.path == "/api/worktree-leases":
@@ -772,7 +1009,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not self._host_ok() or not self._origin_ok() or not self._authorized():
             return self._json(403, {"error": "Доступ запрещён"})
         parsed = urlsplit(self.path)
-        if parsed.path not in ("/api/action", "/api/agent/plan", "/api/runs", "/api/run/cancel", "/api/runs/cancel"):
+        if parsed.path not in ("/api/action", "/api/agent/plan", "/api/runs",
+                               "/api/run/cancel", "/api/runs/cancel", "/api/run/steer"):
             return self._json(404, {"error": "Не найдено"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -798,10 +1036,13 @@ class PanelHandler(BaseHTTPRequestHandler):
                     agent = payload.get("agent", "auto")
                     idempotency_key = payload.get("idempotency_key")
                     model = payload.get("model")
-                    if not isinstance(task_id, str) or not isinstance(role, str) or not isinstance(agent, str):
+                    workspace = payload.get("workspace", "checkout")
+                    if not isinstance(task_id, str) or not isinstance(role, str) or not isinstance(agent, str) \
+                            or not isinstance(workspace, str):
                         return self._json(400, {"error": "Неверные параметры запуска"})
                     run = _start_run(self.server.root, task_id, role, agent,
-                                     idempotency_key=idempotency_key, model=model)
+                                     idempotency_key=idempotency_key, model=model,
+                                     workspace=workspace)
                     return self._json(200, {"ok": True, "run": run})
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
@@ -813,6 +1054,19 @@ class PanelHandler(BaseHTTPRequestHandler):
                     if not isinstance(run_id, str) or not run_id:
                         return self._json(400, {"error": "Не указан run_id"})
                     res = _cancel_run(self.server.root, run_id)
+                    code = 200 if res.get("ok") else 400
+                    return self._json(code, res)
+                except ValueError as exc:
+                    return self._json(404 if "не найден" in str(exc) else 400, {"error": str(exc)})
+                except (OSError, RuntimeError) as exc:
+                    return self._json(502, {"error": f"{type(exc).__name__}: {exc}"})
+            if parsed.path == "/api/run/steer":
+                try:
+                    run_id = payload.get("run_id")
+                    text = payload.get("text")
+                    if not isinstance(run_id, str) or not run_id:
+                        return self._json(400, {"error": "Не указан run_id"})
+                    res = _steer_run(self.server.root, run_id, text if isinstance(text, str) else "")
                     code = 200 if res.get("ok") else 400
                     return self._json(code, res)
                 except ValueError as exc:

@@ -17,8 +17,6 @@ data/
 *.sqlite3
 *.db
 logs/
-tmp*/
-
 
 # IDE
 .vscode/

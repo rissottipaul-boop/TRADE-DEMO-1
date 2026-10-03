@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.worktree_lease import LeaseError, heartbeat, inspect_leases, prepare_worktree
+from src.worktree_lease import (LeaseError, heartbeat, inspect_leases,
+                                prepare_worktree, release_lease)
 
 
 class WorktreeLeaseTests(unittest.TestCase):
@@ -66,6 +67,43 @@ class WorktreeLeaseTests(unittest.TestCase):
         with self.assertRaisesRegex(LeaseError, "вне основного checkout"):
             prepare_worktree(self.root, "T2", "run_T2_nested", parent=self.root / "worktrees")
         self.assertEqual(inspect_leases(self.root), [])
+
+
+    def test_heartbeat_min_interval_throttles_rewrite(self):
+        prepare_worktree(self.root, "T5", "run_T5_abc")
+        path = self.root / "data" / "worktree-leases" / "T5.json"
+        fresh = json.loads(path.read_text(encoding="utf-8"))["heartbeat_at"]
+        # Свежий heartbeat не перезаписывается при min_interval_s.
+        throttled = heartbeat(self.root, "T5", "run_T5_abc", min_interval_s=300)
+        self.assertEqual(throttled["heartbeat_at"], fresh)
+        # Старый heartbeat продлевается даже с min_interval_s.
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["heartbeat_at"] = "2000-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        renewed = heartbeat(self.root, "T5", "run_T5_abc", min_interval_s=300)
+        self.assertNotEqual(renewed["heartbeat_at"], "2000-01-01T00:00:00+00:00")
+        self.assertFalse(inspect_leases(self.root)[0]["stale"])
+
+    def test_release_marks_lease_without_removing_worktree(self):
+        lease = prepare_worktree(self.root, "T4", "run_T4_abc")
+        with self.assertRaisesRegex(LeaseError, "другому запуску"):
+            release_lease(self.root, "T4", "run_T4_wrong")
+        with self.assertRaises(ValueError):
+            release_lease(self.root, "T4", "run_T4_abc", state="deleted")
+        record = release_lease(self.root, "T4", "run_T4_abc")
+        self.assertEqual(record["state"], "released")
+        self.assertIn("released_at", record)
+        # Worktree и ветка остаются для ручной сверки diff.
+        self.assertTrue(Path(lease["worktree"]).is_dir())
+        observed = inspect_leases(self.root)
+        self.assertEqual(observed[0]["state"], "released")
+        self.assertFalse(observed[0]["stale"])
+        # Повторное освобождение не меняет терминальное состояние.
+        self.assertEqual(release_lease(self.root, "T4", "run_T4_abc", state="unknown")["state"],
+                         "released")
+        # Терминальный lease всё ещё резервирует задачу до ручной сверки.
+        with self.assertRaisesRegex(LeaseError, "уже имеет lease"):
+            prepare_worktree(self.root, "T4", "run_T4_new")
 
 
 if __name__ == "__main__":

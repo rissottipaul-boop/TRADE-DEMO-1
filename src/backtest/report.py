@@ -192,8 +192,8 @@ def breaker_trips(r) -> list[tuple[int, float]]:
     """[(время, просадка %)]: просадка кривой wallet от её HWM на последней точке до
     срабатывания global_breaker.
 
-    Если она меньше порога risk.GLOBAL_DD_LIMIT_PCT, breaker сработал раньше номинала:
-    record_pnl прибавляет PnL к equity, уже учтённой update_equity по рынку (двойной учёт).
+    Если она меньше порога risk.GLOBAL_DD_LIMIT_PCT (с допуском на точное равенство),
+    breaker сработал раньше номинала.
     """
     out = []
     for t, e in r.risk_events:

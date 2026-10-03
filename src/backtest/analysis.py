@@ -52,10 +52,12 @@ def lookahead_check(factory: Callable[[], Strategy], bars: Sequence[Bar],
     n_candidates = len(points)
     points = _sample(points, max_points)
     mismatches: list[str] = []
+    sliced_results = {}  # k -> Backtest-результат префикса (BT-BREAKER-ALLRUNS)
     biased: set[str] = set()
     for k in points:
         cut_ts = bars[k].ts
         sliced = _run(bars[:k + 1], factory, spec, **kw)
+        sliced_results[k] = sliced
         for name, vals in base.indicators.items():
             got = sliced.indicators.get(name, [])
             for j in range(k + 1):
@@ -78,7 +80,8 @@ def lookahead_check(factory: Callable[[], Strategy], bars: Sequence[Bar],
     return {"ok": not mismatches, "points": len(points), "candidates": n_candidates,
             "baseline_trades": len(base.trades),
             "biased_indicators": sorted(biased), "mismatches": mismatches[:20],
-            "n_mismatches": len(mismatches)}
+            "n_mismatches": len(mismatches),
+            "base_result": base, "sliced_results": sliced_results}
 
 
 def _trade_key(t) -> tuple:
@@ -133,11 +136,12 @@ def recursive_check(factory: Callable[[], Strategy], bars: Sequence[Bar],
             reason = None
         run_ok = reason is None
         ok &= run_ok
-        runs.append({"offset": s, "ok": run_ok, "reason": reason, "indicators_mismatch": ind_bad,
+        runs.append({"offset": s, "ok": run_ok, "reason": reason, "result": r,
+                     "indicators_mismatch": ind_bad,
                      "max_rel_diff": max_rel, "sync_ts": intervals[0][0] if intervals else None,
                      "trades_compared": n_cmp, "trades_equal": trades_equal,
                      "risk_divergences": divergences})
-    return {"ok": ok, "warmup": warm, "rel_tol": rel_tol, "runs": runs}
+    return {"ok": ok, "warmup": warm, "rel_tol": rel_tol, "runs": runs, "base_result": base}
 
 
 GATING_FIELDS = ("entries_today", "global_loss_streak", "system_pause_until", "daily_breaker",

@@ -12,7 +12,10 @@
 Equity и HWM ведёт только update_equity — баланс биржи по рынку, где PnL
 открытых позиций уже учтён. record_pnl учитывает закрытую сделку в дневном PnL
 и сериях убытков, но equity не меняет: иначе PnL считался бы дважды
-(RISK-PNL-DOUBLE). Без свежего equity (EQUITY_MAX_AGE_S) вход запрещён:
+(RISK-PNL-DOUBLE). Funding SWAP за время позиции передаётся в record_pnl
+параметром funding и входит в day_pnl и серии убытков, а не в equity: в equity
+funding уже сидит через баланс биржи (RISK-FUNDING-PNL). Без свежего equity
+(EQUITY_MAX_AGE_S) вход запрещён:
 breaker'ы по просадке без фида equity слепы.
 
 Выход из позиции (ROUTER-EXIT) — не вход. check_exit_allowed не смотрит на
@@ -522,8 +525,13 @@ class _RiskCore:
             return {"released": min(size, pos["sz"]), "remaining": remaining,
                     "closed": closed, "reason": "ok"}
 
-    def record_pnl(self, inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
+    def record_pnl(self, inst_id: str, pnl: float, closed_at: datetime,
+                   funding: float = 0.0) -> list[str]:
         """Результат закрытой сделки: дневной PnL, серии убытков, блокировки, пауза.
+
+        funding (RISK-FUNDING-PNL) — funding SWAP за время позиции: входит
+        в day_pnl и серии убытков как часть итога (pnl + funding); equity
+        и HWM не меняет, там funding уже учтён через баланс биржи.
 
         Equity и HWM не меняет (RISK-PNL-DOUBLE): их ведёт update_equity по балансу
         биржи, где PnL сделки уже учтён — до закрытия как нереализованный, после
@@ -540,7 +548,8 @@ class _RiskCore:
 
             # Атрибуция PnL к дню закрытия (UTC)
             if _utc_day(closed_at.timestamp()) == _utc_day(_utc_now()):
-                day_pnl = self._get("day_pnl") + pnl
+                # Итог сделки с funding за время позиции: pnl + funding (RISK-FUNDING-PNL)
+                day_pnl = self._get("day_pnl") + pnl + funding
                 self._set("day_pnl", day_pnl)
             else:
                 day_pnl = self._get("day_pnl")
@@ -551,7 +560,7 @@ class _RiskCore:
                     "SELECT loss_streak FROM risk_instruments WHERE inst_id=?", (inst_id,)
                 ).fetchone()
                 prev_streak = row["loss_streak"] if row else 0
-                inst_streak = prev_streak + 1 if pnl < 0 else 0
+                inst_streak = prev_streak + 1 if pnl + funding < 0 else 0
                 conn.execute(
                     "INSERT OR REPLACE INTO risk_instruments (inst_id, loss_streak, blocked_until) "
                     "VALUES (?, ?, COALESCE((SELECT blocked_until FROM risk_instruments WHERE inst_id=?), NULL))",
@@ -559,7 +568,7 @@ class _RiskCore:
                 )
 
             self._log_event("pnl", inst_id=inst_id,
-                            detail=f"pnl={pnl:.2f} equity={equity:.2f} day_pnl={day_pnl:.2f}")
+                            detail=f"pnl={pnl:.2f} funding={funding:.2f} equity={equity:.2f} day_pnl={day_pnl:.2f}")
 
             # Дневной лимит -6%
             day_start = self._get("day_start_equity")
@@ -577,7 +586,7 @@ class _RiskCore:
                 events.append("global_breaker")
 
             # Серия убытков по инструменту -> блокировка 24ч
-            if pnl < 0:
+            if pnl + funding < 0:
                 if inst_streak >= INST_LOSS_STREAK_BLOCK and not self.is_instrument_blocked(inst_id):
                     self.block_instrument(inst_id, INST_BLOCK_HOURS)
                     events.append("instrument_blocked")
@@ -765,9 +774,13 @@ def check_leverage(lever: Any) -> tuple[bool, str]:
     return True, "ok"
 
 
-def record_pnl(inst_id: str, pnl: float, closed_at: datetime) -> list[str]:
-    """Закрытая сделка: day_pnl, серии убытков, блокировки. Equity и HWM не меняет."""
-    return _c().record_pnl(inst_id, pnl, closed_at)
+def record_pnl(inst_id: str, pnl: float, closed_at: datetime,
+               funding: float = 0.0) -> list[str]:
+    """Закрытая сделка: day_pnl, серии убытков, блокировки. Equity и HWM не меняет.
+
+    funding — funding SWAP за время позиции: входит в day_pnl и серии убытков
+    как часть итога (pnl + funding), в equity уже учтён через баланс биржи."""
+    return _c().record_pnl(inst_id, pnl, closed_at, funding=funding)
 
 
 def trip_breaker(reason: str, scope: str = "global") -> None:
