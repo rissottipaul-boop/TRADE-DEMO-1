@@ -13,6 +13,13 @@ foreach ($morphyPair in @(
 )) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $morphyPair[0]) -Destination $morphyPair[1]
 }
+
+$srcDir = Join-Path $PSScriptRoot 'project'
+$dstDir = Join-Path $morphyClient 'project'
+if (Test-Path $srcDir) {
+    if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
+    Copy-Item -Path "$srcDir\*" -Destination $dstDir -Recurse -Force
+}
 $morphyUtf8 = New-Object System.Text.UTF8Encoding($false)
 $morphyAppPath = Join-Path $morphyClient 'App.tsx'
 $morphyApp = [IO.File]::ReadAllText($morphyAppPath)
@@ -45,3 +52,5 @@ $morphySidebar = $morphySidebar.Replace("Workspace: {backendStatus === 'healthy'
 [IO.File]::WriteAllText($morphySidebarPath, $morphySidebar, $morphyUtf8)
 'Экран проекта установлен. Morphy обновит frontend и backend через штатный watcher.'
 'Открыть: http://127.0.0.1:7480/'
+
+
