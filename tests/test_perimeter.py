@@ -1,4 +1,5 @@
-"""PERIMETER-DRIFT-CHECK: сверка файлов периметра guard с HEAD на временном git-репозитории.
+"""PERIMETER-DRIFT-CHECK и PERIMETER-COMMIT-WATCH: сверка периметра guard с HEAD
+и коммиты в периметр после базы (--since) на временном git-репозитории.
 
 Боевой репозиторий не трогается: фикстура — отдельный `git init` в каталоге tmp.
 Состав периметра берётся из настоящего guard, как в рабочей команде.
@@ -26,7 +27,9 @@ FIXTURE = {
 }
 
 
-class PerimeterRepoTests(unittest.TestCase):
+class RepoFixture(unittest.TestCase):
+    """Временный репозиторий с коммитом FIXTURE; своих тестов нет."""
+
     def setUp(self):
         self.temp = TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
@@ -53,6 +56,24 @@ class PerimeterRepoTests(unittest.TestCase):
     def statuses(self, report) -> dict:
         return {e.path: e.status for e in report.entries}
 
+    def head(self) -> str:
+        return self.git("rev-parse", "HEAD").strip()
+
+    def commit(self, message: str, files: dict) -> str:
+        for rel, data in files.items():
+            self.write(rel, data)
+        self.git("add", "--", *files)
+        self.git("commit", "-qm", message)
+        return self.head()
+
+    def ops_run(self, *args) -> tuple[int, str, str]:
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = ops.main(["perimeter", *args, "--root", str(self.root)])
+        return code, out.getvalue(), err.getvalue()
+
+
+class PerimeterRepoTests(RepoFixture):
     def test_unchanged_files_are_clean(self):
         report = perimeter.check(self.root)
         st = self.statuses(report)
@@ -142,6 +163,162 @@ class PerimeterRepoTests(unittest.TestCase):
         statuses = {f["path"]: f["status"] for f in data["files"]}
         self.assertEqual(statuses["src/risk.py"], "modified")
         self.assertEqual(statuses[".codex/hooks.json"], "clean")
+
+
+class PerimeterSinceTests(RepoFixture):
+    """--since: коммиты <sha>..HEAD, затронувшие периметр (PERIMETER-COMMIT-WATCH)."""
+
+    def branch(self) -> str:
+        return self.git("rev-parse", "--abbrev-ref", "HEAD").strip()
+
+    @staticmethod
+    def changes(files) -> list:
+        return [(f.path, f.status) for f in files]
+
+    def test_commit_outside_perimeter_exit_0(self):
+        base = self.head()
+        self.commit("docs", {"README.md": b"docs only\n", "src/other.py": b"x = 1\n"})
+        report = perimeter.check(self.root, since=base)
+        self.assertEqual(report.since.base, base)
+        self.assertTrue(report.since.ancestor)
+        self.assertEqual(report.since.commits, [])
+        self.assertEqual(report.exit_code, 0)
+        code, out, _ = self.ops_run("--since", base[:7])
+        self.assertEqual(code, 0)
+        self.assertIn(f"Коммитов в периметр после {base[:7]}", out)
+
+    def test_commit_in_perimeter_exit_1_although_files_are_clean(self):
+        # Правка уже в коммите: сверка с HEAD чиста, а --since её видит (случай guard.py → b30ca77)
+        base = self.head()
+        self.commit("docs", {"README.md": b"docs\n"})
+        sha = self.commit("tune guard", {"ops/hooks/guard.py": b"# relaxed guard\n", "README.md": b"docs 2\n"})
+        report = perimeter.check(self.root, since=base)
+        self.assertEqual(report.drift, [])
+        self.assertEqual(len(report.since.commits), 1)
+        c = report.since.commits[0]
+        self.assertEqual((c.sha, c.author, c.email, c.subject),
+                         (sha, "Perimeter Test", "perimeter@example.invalid", "tune guard"))
+        self.assertRegex(c.time, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertRegex(c.committed, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertEqual(self.changes(c.files), [("ops/hooks/guard.py", "M")])
+        self.assertEqual(report.exit_code, 1)
+        # Без --since поведение прежнее: файлы совпадают с HEAD — код 0
+        self.assertEqual(perimeter.check(self.root).exit_code, 0)
+        self.assertEqual(self.ops_run()[0], 0)
+
+        code, out, _ = self.ops_run("--since", base)
+        self.assertEqual(code, 1)
+        self.assertIn(f"{sha[:12]}  {c.time}  Perimeter Test  tune guard", out)
+        self.assertIn("ops/hooks/guard.py", out)
+        code, out, _ = self.ops_run("--since", base, "--json")
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        self.assertEqual(data["head"], sha)
+        self.assertEqual(data["since"]["base"], base)
+        self.assertEqual([x["sha"] for x in data["since"]["commits"]], [sha])
+        self.assertEqual(data["since"]["commits"][0]["files"], [{"path": "ops/hooks/guard.py", "status": "M"}])
+        self.assertEqual(data["exit_code"], 1)
+
+    def test_unknown_sha_exit_2(self):
+        code, _, err = self.ops_run("--since", "0123456789abcdef0123456789abcdef01234567")
+        self.assertEqual(code, 2)
+        self.assertIn("не найден", err)
+        code, out, _ = self.ops_run("--since", "nosuchref", "--json")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["exit_code"], 2)
+        with self.assertRaisesRegex(perimeter.PerimeterError, "нужен sha"):
+            perimeter.check(self.root, since="--all")  # значение не становится опцией git
+
+    def test_since_head_exit_0_and_head_in_output(self):
+        head = self.head()
+        code, out, _ = self.ops_run("--since", "HEAD")
+        self.assertEqual(code, 0)
+        self.assertIn(head, out.splitlines()[0])
+        _, out, _ = self.ops_run()  # полный HEAD в первой строке и без --since
+        self.assertIn(head, out.splitlines()[0])
+        _, out, _ = self.ops_run("--json")
+        data = json.loads(out)
+        self.assertEqual(data["head"], head)
+        self.assertNotIn("since", data)  # без --since JSON прежний
+
+    def test_dir_files_case_and_rename(self):
+        # Каталог периметра — по префиксу, регистр не важен, переименование наружу — D
+        base = self.head()
+        self.commit("codex config", {".codex/config.toml": b"approval = 'never'\n"})
+        self.commit("github hooks", {".GitHub/Hooks/pre.json": b"{}\n"})
+        self.git("mv", "src/risk.py", "src/risk_old.py")
+        self.git("commit", "-qm", "move risk")
+        report = perimeter.check(self.root, since=base)
+        self.assertEqual([c.subject for c in report.since.commits], ["codex config", "github hooks", "move risk"])
+        self.assertEqual([self.changes(c.files) for c in report.since.commits],
+                         [[(".codex/config.toml", "A")], [(".GitHub/Hooks/pre.json", "A")], [("src/risk.py", "D")]])
+        self.assertEqual(report.exit_code, 1)
+
+    def test_merge_commit_with_own_perimeter_change(self):
+        # Правка, внесённая самим слиянием, видна (-c); обычное слияние без своих правок не выводится
+        base, main = self.head(), self.branch()
+        self.git("checkout", "-qb", "side")
+        self.commit("side docs", {"README.md": b"side\n"})
+        self.git("checkout", "-q", main)
+        self.commit("main docs", {"other.txt": b"main\n"})
+        self.git("merge", "-q", "--no-ff", "--no-commit", "side")
+        self.write("src/risk.py", b"# changed in merge\n")
+        self.git("add", "src/risk.py")
+        self.git("commit", "-qm", "merge side")
+        merge = self.head()
+        report = perimeter.check(self.root, since=base)
+        self.assertEqual([c.sha for c in report.since.commits], [merge])
+        self.assertEqual(self.changes(report.since.commits[0].files), [("src/risk.py", "MM")])
+        self.assertEqual(report.exit_code, 1)
+
+    def test_plain_merge_lists_branch_commit_only(self):
+        base, main = self.head(), self.branch()
+        self.git("checkout", "-qb", "side")
+        side = self.commit("side risk", {"src/risk.py": b"# side\n"})
+        self.git("checkout", "-q", main)
+        self.commit("main docs", {"other.txt": b"main\n"})
+        self.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+        report = perimeter.check(self.root, since=base)
+        self.assertEqual([c.sha for c in report.since.commits], [side])
+        self.assertEqual(report.exit_code, 1)
+
+    def test_base_not_ancestor_compares_trees(self):
+        # База с правкой периметра, которой нет в HEAD (откат истории): коммитов нет, дерево отличается
+        main = self.branch()
+        self.git("checkout", "-qb", "side")
+        base = self.commit("tighten risk", {"src/risk.py": b"# tightened\n"})
+        self.git("checkout", "-q", main)
+        self.commit("docs", {"README.md": b"docs\n"})
+        report = perimeter.check(self.root, since=base)
+        self.assertFalse(report.since.ancestor)
+        self.assertEqual(report.since.commits, [])
+        self.assertEqual(self.changes(report.since.tree_diff), [("src/risk.py", "M")])
+        self.assertEqual(report.drift, [])
+        self.assertEqual(report.exit_code, 1)
+        code, out, _ = self.ops_run("--since", base)
+        self.assertEqual(code, 1)
+        self.assertIn("не предок HEAD", out)
+
+    def test_base_not_ancestor_without_perimeter_diff_is_0(self):
+        main = self.branch()
+        self.git("checkout", "-qb", "side")
+        base = self.commit("side docs", {"README.md": b"side\n"})
+        self.git("checkout", "-q", main)
+        self.commit("main docs", {"other.txt": b"main\n"})
+        report = perimeter.check(self.root, since=base)
+        self.assertFalse(report.since.ancestor)
+        self.assertEqual((report.since.commits, report.since.tree_diff), ([], []))
+        self.assertEqual(report.exit_code, 0)
+
+    def test_since_does_not_write_git_state(self):
+        base = self.head()
+        self.commit("tune guard", {"ops/hooks/guard.py": b"# x\n"})
+        state = ((self.root / ".git" / "index").read_bytes(), self.git("count-objects", "-v"),
+                 self.git("for-each-ref"))
+        perimeter.check(self.root, since=base)
+        perimeter.check(self.root, since="HEAD")
+        self.assertEqual(((self.root / ".git" / "index").read_bytes(), self.git("count-objects", "-v"),
+                          self.git("for-each-ref")), state)
 
 
 class PerimeterErrorTests(unittest.TestCase):

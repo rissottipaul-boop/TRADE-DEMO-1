@@ -16,6 +16,9 @@ demo — data/risk_state.db и data/bot_state.db, live — data/live/.
     python -m src.ops perimeter [--json]         # файлы периметра guard против HEAD: статус и mtime;
                                                  # 0 — чисто, 1 — расхождение, 2 — сверка невозможна
                                                  # (только чтение git, src/perimeter.py)
+    python -m src.ops perimeter --since <sha>    # плюс коммиты <sha>..HEAD, затронувшие периметр
+                                                 # (хеш, автор, время, файлы): есть — код 1;
+                                                 # sha не найден — 2; текущий HEAD — в первой строке
 
 --mode — только ПОСЛЕ команды (по умолчанию OKX_MODE из окружения, иначе demo).
 Опций перед командой нет намеренно: правило guard для `src.ops reset` (сброс —
@@ -96,8 +99,8 @@ def cmd_reset(args: argparse.Namespace) -> int:
 
 
 def cmd_perimeter(args: argparse.Namespace) -> int:
-    # Без риск-ядра и биржи: только git и mtime (PERIMETER-DRIFT-CHECK)
-    return perimeter.run(args.root, args.json)
+    # Без риск-ядра и биржи: только git и mtime (PERIMETER-DRIFT-CHECK, PERIMETER-COMMIT-WATCH)
+    return perimeter.run(args.root, args.json, args.since)
 
 
 def main(argv=None) -> int:
