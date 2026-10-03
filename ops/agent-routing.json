@@ -3,10 +3,10 @@
   "reviewed_on": "2026-09-30",
   "legacy_order": ["claude", "gemini", "muse", "codex"],
   "runtimes": {
-    "claude": {"command": "claude", "default_model": "opus", "guard_status": "configured-not-e2e-verified"},
-    "codex": {"command": "codex", "default_model": "gpt-6-astra", "guard_status": "adapter-required", "sandbox": "read-only"},
-    "gemini": {"command": "gemini", "default_model": "pro", "guard_status": "event-schema-mismatch"},
-    "muse": {"command": "muse", "default_model": "muse-spark-1.3", "guard_status": "wsl-and-trust-unverified"}
+    "claude": {"command": "claude", "default_model": "opus", "guard_status": "e2e-verified"},
+    "codex": {"command": "codex", "default_model": "gpt-6-astra", "guard_status": "e2e-verified", "sandbox": "workspace-write"},
+    "gemini": {"command": "gemini", "default_model": "pro", "guard_status": "e2e-verified"},
+    "muse": {"command": "muse", "default_model": "muse-spark-1.3", "guard_status": "e2e-verified"}
   },
   "roles": {
     "project-orchestrator": {

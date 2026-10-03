@@ -317,6 +317,37 @@ class ClassifierTest(unittest.TestCase):
         c = pl.Classifier(RULES, "demo", {}, stopped)
         self.assertEqual(c(bill(T0, "LTC", 0.1, instId="LTC-USDT", clOrdId=cl)).source, "bot:?")
 
+    def test_orphan_fill_goes_to_bot_stopped_nearest(self):
+        """PNL-RECON-DRIFT: при остановке бот продаёт остаток ордером без algoId; кандидатов
+        на instId несколько — берём бот, чей конец жизни ближе всего к исполнению."""
+        ts = T0 + 2_000
+        bots = {"running": {"instId": "BTC-USDT", "cTime": str(T0 - DAY), "state": "running"},
+                "stopped": {"instId": "BTC-USDT", "cTime": str(T0 - DAY), "stopTime": str(T0)}}
+        c = pl.Classifier(RULES, "demo", {}, bots)
+        legs = fill(ts, "sell", 0.001, 50_000.0, cl="O" + "2" * 19, tag="CLI")
+        self.assertEqual({c(leg).source for leg in legs}, {"bot:stopped"})
+        self.assertEqual((c.heuristic_bills, c.orphan_bot_bills), (2, 0))
+
+    def test_orphan_fill_inherits_open_position_owner(self):
+        """Сработавший TP/SL (clOrdId «O» + 19 цифр, tag CLI) закрывает позицию памп-кармана:
+        обе ноги и все части ордера — в рукав владельца позиции, а не в «прочее/ручное»."""
+        c = pl.Classifier(RULES, "demo", {}, {}, pl.registry_owner_of())
+        entry = fill(T0, "buy", 100.0, 0.5, inst="FET-USDT", cl=order_owner.new_cl_ord_id(order_owner.PUMP),
+                     tag="CLI")
+        self.assertEqual({c(leg).sleeve for leg in entry}, {"pump"})
+        stop_ord = "3968581435675062273"
+        stop = (fill(T0 + HOUR, "sell", 60.0, 0.45, inst="FET-USDT", cl="O" + "3" * 19, tag="CLI", ord_id=stop_ord)
+                + fill(T0 + HOUR, "sell", 40.0, 0.45, inst="FET-USDT", cl="O" + "3" * 19, tag="CLI", ord_id=stop_ord))
+        stop[0], stop[1] = stop[1], stop[0]  # котируемая нога первой: направление всё равно — продажа базы
+        attrs = [c(leg) for leg in stop]
+        self.assertEqual({(a.sleeve, a.source) for a in attrs}, {("pump", "clOrdId:pmp")})
+        self.assertIn("открытой позиции", attrs[0].note)
+        self.assertEqual((c.position_bills, c.orphan_bot_bills), (4, 0))
+        # позиция закрыта — следующее исполнение без algoId уже не к кому отнести
+        late = c(fill(T0 + 2 * HOUR, "sell", 1.0, 0.45, inst="FET-USDT", cl="O" + "4" * 19, tag="CLI")[0])
+        self.assertEqual((late.sleeve, late.source), ("manual", "bot:?"))
+        self.assertEqual(c.orphan_bot_bills, 1)
+
     def test_bot_end(self):
         self.assertEqual(pl.bot_end_ms({"stopTime": "5"}), 5.0)
         self.assertEqual(pl.bot_end_ms({"state": "stopped", "uTime": "7"}), 7.0)
@@ -474,6 +505,75 @@ class BuildReportTest(unittest.TestCase):
         report = pl.build_report(inputs(self.sc, engine_curve=[(snap_ts, snap * 3)]), RULES)
         self.assertIsNone(report["equity"]["check"])
         self.assertTrue(any("несопоставимых" in n for n in report["notes"]))
+
+    def _two_snapshots(self, index_usd=None, end_factor: float = 1.0) -> dict:
+        """Снимки equity_curve движка (totalEq, USD) до и после продажи DCA в T0+1ч.
+        Биржа оценивает BTC индексом 50 000 → 50 400 USD, спот в фейке — 51 000."""
+        ref_ts, end_ts = T0 + 30 * 60_000, T0 + 90 * 60_000
+        idx = {ref_ts: 50_000.0, end_ts: 50_400.0}
+        ref_usd = 5_000 + 0.0999 * idx[ref_ts]
+        end_usd = (7_597.4 + 0.0499 * idx[end_ts]) * end_factor
+        index = (lambda ccy, ts: {"BTC": idx.get(ts), "USDT": 1.0}.get(ccy)) if index_usd else None  # noqa: E731
+        return pl.build_report(inputs(self.sc, engine_curve=[(ref_ts, ref_usd), (end_ts, end_usd)],
+                                      valuation=None, index_usd=index), RULES)
+
+    def test_exchange_check_prices_usd_snapshots_by_index(self):
+        """PNL-RECON-DRIFT: totalEq биржи = Σ eq × индекс <ccy>-USD. Модель по ценам demo-спота
+        давала «невязку» из-за ухода спота от индекса; в ценах источника снимка её нет."""
+        check = self._two_snapshots(index_usd=True)["equity"]["check"]
+        self.assertEqual((check["from"]["pricing"], check["to"]["pricing"]), ("index", "index"))
+        self.assertAlmostEqual(check["residual_usdt"], 0.0, places=6)
+        d_spot = 2_597.4 - 0.05 * BTC_NOW                       # 47.4: спот BTC не менялся
+        d_index = 2_597.4 + 0.0499 * 50_400 - 0.0999 * 50_000   # 117.36
+        self.assertAlmostEqual(check["model_spot_delta_usdt"], d_spot, places=6)
+        self.assertAlmostEqual(check["price_basis_usdt"], d_index - d_spot, places=6)
+        self.assertAlmostEqual(check["residual_spot_usdt"], d_index - d_spot, places=6)
+        # без индексов — прежняя оценка по споту: разница цен остаётся в невязке
+        check = self._two_snapshots(index_usd=False)["equity"]["check"]
+        self.assertEqual(check["from"]["pricing"], "spot")
+        self.assertAlmostEqual(check["residual_usdt"], d_index - d_spot, places=6)
+        self.assertEqual(check["price_basis_usdt"], 0.0)
+
+    def test_residual_above_threshold_is_a_warning(self):
+        report = self._two_snapshots(index_usd=True, end_factor=1.003)
+        self.assertGreater(report["equity"]["check"]["residual_pct"], pl.RESIDUAL_WARN_PCT)
+        self.assertTrue(any(w.startswith("невязка с биржей") for w in report["warnings"]), report["warnings"])
+        report = self._two_snapshots(index_usd=True, end_factor=1.001)
+        self.assertLess(report["equity"]["check"]["residual_pct"], pl.RESIDUAL_WARN_PCT)
+        self.assertFalse(any(w.startswith("невязка с биржей") for w in report["warnings"]))
+
+    def _okb_sale(self, sale_ts: int, qty: float = 100.0) -> dict:
+        """Стартовые 100 OKB и 1 000 USDT; ордер человека без меток продаёт OKB по 120."""
+        bills = [bill(T0 - 2 * DAY, "OKB", 100.0, type_="1"), bill(T0 - 2 * DAY, "USDT", 1_000.0, type_="1")]
+        bills += fill(sale_ts, "sell", qty, 120.0, fee_quote=12.0, inst="OKB-USDT")
+        eq: dict = {}
+        for row in bills:
+            eq[row["ccy"]] = eq.get(row["ccy"], 0.0) + float(row["balChg"])
+        okb = lambda ccy, ts: {"USDT": 1.0, "OKB": 120.0 if ts == T0 else 110.0}.get(ccy)  # noqa: E731
+        return pl.build_report(inputs(self.sc, bills=bills, eq=eq, order_map={}, bots={}, earn=[], price=okb,
+                                      total_eq_usd=None, valuation=None), RULES)
+
+    def test_manual_sale_of_starting_asset_is_a_conversion(self):
+        """PNL-RECON-DRIFT: продажа стартового актива человеком не создаёт шорт в «Прочее/ручное»,
+        который потом каждый день переоценивается навстречу «вне рукавов»."""
+        before = self._okb_sale(T0 - DAY)
+        self.assertFalse(sleeve(before, "manual")["active"])
+        self.assertEqual(before["unallocated"]["holdings_end"], {"USDT": 12_988.0})
+        self.assertAlmostEqual(before["unallocated"]["revaluation_usdt"], 0.0)  # OKB уже нет — переоценивать нечего
+        self.assertEqual(before["unallocated"]["conversions"], {})
+        self.assertTrue(any("обмен стартовых активов" in n for n in before["notes"]))
+        during = self._okb_sale(T0 + HOUR)
+        self.assertFalse(sleeve(during, "manual")["active"])
+        self.assertEqual(during["unallocated"]["conversions"], {"OKB": -100.0, "USDT": 11_988.0})
+        # 100 OKB по 120 на начало дня, проданы по 120 с комиссией 12: −12 за день
+        self.assertAlmostEqual(during["unallocated"]["revaluation_usdt"], -12.0, places=6)
+        self.assertAlmostEqual(during["unallocated"]["capital_flows_usdt"], 0.0)
+        for report in (before, during):
+            self.assertLess(abs(report["reconciliation"]["identity_error_usdt"]), 1e-6)
+        # продано больше, чем было стартового актива, — это уже позиция человека
+        oversold = self._okb_sale(T0 + HOUR, qty=150.0)
+        self.assertTrue(sleeve(oversold, "manual")["active"])
+        self.assertLess(abs(oversold["reconciliation"]["identity_error_usdt"]), 1e-6)
 
     def test_equity_path_drawdown(self):
         path = pl._equity_path([100.0, 110.0, 99.0, 105.0])
@@ -798,6 +898,16 @@ class PriceBookTest(unittest.TestCase):
         self.assertEqual(rate(NOW_MS), 1.0)
         self.assertEqual(rate(T0), 1.0)
         self.assertEqual((ex.calls.count("index_tickers"), ex.calls.count("index_candles")), (1, 1))
+
+    def test_index_usd_prices(self):
+        ex = FakeOkx([], NOW_MS)
+        index = pl.IndexBook(pl.Reader(ex), NOW_MS, [])
+        self.assertEqual(index("USDT", NOW_MS), 1.0)           # index-tickers quoteCcy=USD, один запрос
+        self.assertIsNone(index("XYZ", NOW_MS - 1000))
+        self.assertEqual(ex.calls.count("index_tickers"), 1)
+        self.assertEqual(index("BTC", T0), 1.0)                # прошлое — минутная свеча индекса BTC-USD
+        self.assertEqual(index("BTC", T0 + 1_000), 1.0)        # та же минута — из кэша
+        self.assertEqual(ex.calls.count("index_candles"), 1)
 
 
 class EngineCurveTest(unittest.TestCase):

@@ -106,10 +106,10 @@
 
 | Рантайм | Модель | Конфиг проекта | Guard-хук | Быстрый старт |
 | --- | --- | --- | --- | --- |
-| **Claude Code** | `opus`; Sentinel — `sonnet` | `.claude/settings.json`, `.claude/agents/` | PreToolUse настроен; локальные guard-тесты отдельно от проверки клиента | `claude` |
-| **Codex** | `gpt-6-astra`; Sentinel — `gpt-6-sol` | `AGENTS.md`, реестр ролей | Автоматический hook проекта ещё не подключён; launcher использует read-only | `ops\agent-rotate.ps1 -Agent codex -Role insight-executor` |
-| **Google Gemini CLI / Antigravity** | Gemini CLI `pro`; AGY выбирает модель отдельно | `.gemini/GEMINI.md`, `AGENTS.md` | Найдено несовпадение `PreToolUse` / `BeforeTool`; AGY не проверен | `gemini` или отдельно `agy` |
-| **Meta Muse Code** | `muse-spark-1.3` | `.muse/hooks.json`, `AGENTS.md`; загрузка project settings не проверена | Требует проверки trust и Windows/WSL-команды hook | `muse` либо существующий `ops\muse.cmd` |
+| **Claude Code** | `opus`; Sentinel — `sonnet` | `.claude/settings.json`, `.claude/agents/` | PreToolUse настроен; E2E подтверждён 03.10 (`ops/hooks/launch-e2e.json`) | `claude` |
+| **Codex** | `gpt-6-astra`; Sentinel — `gpt-6-sol` | `AGENTS.md`, реестр ролей, `.codex/hooks.json` | Hook подключён; E2E подтверждён 03.10; launcher: `workspace-write` + сеть, approvals `never` | `ops\agent-rotate.ps1 -Agent codex -Role insight-executor` |
+| **Google Gemini CLI / Antigravity** | Gemini CLI `pro`; AGY выбирает модель отдельно | `.gemini/GEMINI.md`, `.gemini/settings.json`, `AGENTS.md` | `BeforeTool`-адаптер подключён; E2E подтверждён 03.10; launcher: `--approval-mode yolo`; AGY не проверен | `gemini` или отдельно `agy` |
+| **Meta Muse Code** | `muse-spark-1.3` | `.muse/hooks.json`, `.muse/settings.json`, `AGENTS.md` | Адаптер подключён; E2E подтверждён 03.10; launcher добавляет `--trust-workspace` | `muse` либо существующий `ops\muse.cmd` |
 
 **Ротация:** `ops\agent-rotate.ps1` без `-Role` сохраняет порядок Claude → Gemini → Muse, Codex добавлен последним; `-Role` применяет приоритеты и модели из реестра. `-Plan` только показывает JSON-план. После запуска процесса скрипт возвращает его код выхода и не повторяет задание другим агентом автоматически. Поддерживает headless-режим:
 
@@ -133,7 +133,7 @@ ops\agent-rotate.ps1 -Agent antigravity -Prompt "Задача T42: добавь 
 ops\agent-rotate.ps1 -Headless -Agent claude -Prompt "Запусти тесты и обнови доску"
 ```
 
-**Единая точка правды:** `AGENTS.md`, `ops/board.md` и `.github/agents/`. Общий guard не копируем и не ослабляем. В роли Codex по умолчанию выполняет прямую задачу пользователя как Insight Executor; не объявляет себя вторым автопилотом и не перехватывает текущие claims. Запуск через новую ролевую ротацию для непроверенных клиентов ограничен анализом; sandbox Codex не заменяет guard и не гарантирует запрет внешних действий через MCP. Текущие сессии других агентов и их hook/autopilot-настройки не перенастраиваются.
+**Единая точка правды:** `AGENTS.md`, `ops/board.md` и `.github/agents/`. Общий guard не копируем и не ослабляем. В роли Codex по умолчанию выполняет прямую задачу пользователя как Insight Executor; не объявляет себя вторым автопилотом и не перехватывает текущие claims. Лаунчер снимает ограничения (read-only sandbox, префикс «только анализ») только при `guard_status = e2e-verified` в `ops/agent-routing.json` (подтверждение — `ops/hooks/launch-e2e.json`); для непроверенных клиентов запуск по-прежнему ограничен анализом. Sandbox Codex не заменяет guard и не гарантирует запрет внешних действий через MCP. Текущие сессии других агентов и их hook/autopilot-настройки не перенастраиваются.
 
 **Передача при лимите:** исходный процесс завершён → заметка задачи содержит роль/рантайм/фактическую модель, изменённые файлы, команды и результаты проверок, незавершённые внешние действия с ID, следующий шаг → задача возвращена в `ready` с пометкой передачи → новый агент делает SYNC и CLAIM. Если процесс оборвался до записи, преемник сначала восстанавливает состояние из diff, доски и журналов; торговые запросы без результата не повторяет, пока не сверит их с биржей. При невозможности сверки — `blocked`. Отказ guard, ошибка авторизации, сети или теста не являются исчерпанием квоты. Переход на другую модель одного провайдера не гарантирует отдельный лимит.
 

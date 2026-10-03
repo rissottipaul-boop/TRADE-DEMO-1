@@ -15,6 +15,9 @@
 2. Атрибуция по рукавам business-plan.md §2.1 — правила ops/sleeves.json:
    ордер нативного grid/DCA-бота (ordId из sub-orders) -> рукав бота (signal contract пока без sync); иначе владелец по
    префиксу clOrdId (коды реестра src/order_owner.py, если он есть), затем tag;
+   исполнение с clOrdId «O» + 19 цифр без ordId в журнале (закрытие при остановке
+   бота, сработавший TP/SL) — бот по instId и времени, иначе владелец открытой
+   позиции по instId; продажа стартового актива без меток — обмен «вне рукавов»;
    неопознанное — рукав default_sleeve («прочее/ручное»), не выбрасывается.
 3. PnL рукава — mark-to-market его движений: V(t) = сумма по валютам
    накопленного balChg рукава x цена в USDT; PnL периода = V(t1) - V(t0).
@@ -23,7 +26,9 @@
 4. Сверка: изменение стоимости торгового счёта = сумма PnL рукавов + переоценка
    активов вне рукавов + переводы капитала (тождество модели). Независимая
    проверка — снимки equity биржи: equity_curve движка (только чтение) и снимки
-   самого ledger.
+   самого ledger. totalEq биржи = Σ eq × индекс <ccy>-USD (demo 03.10), поэтому
+   модель для снимков в USD оценивается теми же индексами; невязка > 0.2% equity —
+   предупреждение.
 
 Ордеров ledger не ставит: Reader пропускает только private_get_* / public_get_*.
 Базы движка (bot_state.db, risk_state.db) открываются только на чтение.
@@ -54,6 +59,8 @@ DAY_MS = 86_400_000
 BILLS_DEPTH_DAYS = 7             # account/bills — последние 7 дней, глубже — bills-archive (3 месяца)
 BACKFILL_DAYS = 7                # глубина первой загрузки журнала
 REF_MAX_DEVIATION = 0.05         # снимок equity дальше 5% от модели — другой источник, не сравниваем
+RESIDUAL_WARN_PCT = 0.2          # невязка со снимками биржи больше 0.2% equity — предупреждение (exit 1)
+INDEX_MIN_VALUE_USDT = 1.0       # пыль дешевле 1 USDT оцениваем по споту, без запроса свечи индекса
 PREFILTER_DEVIATION = 0.10       # грубый отсев снимков по текущим ценам, без запросов свечей
 PRICE_NOW_TOLERANCE_MS = 120_000
 EPS = 1e-9
@@ -674,6 +681,43 @@ class UsdRate:
         return self._cache[key]
 
 
+class IndexBook:
+    """Цена валюты в USD по индексу OKX (<ccy>-USD) — так биржа считает eqUsd и totalEq.
+
+    На demo 03.10 проверено: eqUsd / eq = idxPx <ccy>-USD по каждой валюте, а сумма eqUsd = totalEq.
+    Цены demo-спота могут уходить от индекса (BTC-USDT 02.10: +0.4% → +1.4%), поэтому снимки
+    equity_curve движка (totalEq, USD) сверяются с моделью, оценённой по тем же индексам.
+    Сейчас — один запрос index-tickers, в прошлом — минутные свечи индекса.
+    """
+
+    def __init__(self, reader: Reader, now_ms: int, warnings: list[str]):
+        self.reader, self.now_ms, self.warnings = reader, now_ms, warnings
+        self._now: Optional[dict[str, float]] = None
+        self._cache: dict[tuple[str, int], Optional[float]] = {}
+
+    def _tickers(self) -> dict[str, float]:
+        if self._now is None:
+            try:
+                self._now = {t["instId"]: float(t["idxPx"])
+                             for t in self.reader.get("public_get_market_index_tickers", {"quoteCcy": "USD"})
+                             if (_f(t.get("idxPx")) or 0) > 0}
+            except Exception as exc:  # noqa: BLE001
+                self._now = {}
+                self.warnings.append(f"индексы <ccy>-USD недоступны: {_short(exc)}")
+        return self._now
+
+    def __call__(self, ccy: str, ts_ms: int) -> Optional[float]:
+        if abs(ts_ms - self.now_ms) <= PRICE_NOW_TOLERANCE_MS:
+            return self._tickers().get(f"{ccy}-USD")
+        key = (ccy, ts_ms // 60_000)
+        if key not in self._cache:
+            try:
+                self._cache[key] = candle_price(self.reader, f"{ccy}-USD", ts_ms, index=True)
+            except Exception:  # noqa: BLE001 — индекса может не быть: оценка по споту
+                self._cache[key] = None
+        return self._cache[key]
+
+
 def read_equity_curve(db_path: Path, since_ms: int, until_ms: int) -> list[tuple[int, float]]:
     """Снимки equity_curve из bot_state.db режима — ТОЛЬКО чтение (mode=ro)."""
     path = Path(db_path)
@@ -715,7 +759,11 @@ class Classifier:
         self.unmapped_bots: set[str] = set()
         self.unknown_types: dict[str, int] = defaultdict(int)
         self.heuristic_bills = 0
+        self.position_bills = 0
         self.orphan_bot_bills = 0
+        # открытые спот-позиции источников: (instId, sleeve, source) -> [qty базы, ts последнего исполнения]
+        self.open_positions: dict[tuple[str, str, str], list] = {}
+        self._orphan_by_order: dict[str, tuple[Optional[str], Optional[Attr]]] = {}
 
     @staticmethod
     def _longest(value: str, table: dict[str, str]) -> Optional[str]:
@@ -746,12 +794,60 @@ class Classifier:
         return self.default
 
     def bot_by_inst_time(self, bill: dict) -> Optional[str]:
+        """Бот по instId и времени жизни (±10 мин). Несколько кандидатов — тот, что остановился
+        ближе всего к исполнению: при остановке бот закрывает остаток ордером без algoId."""
         inst, ts = bill.get("instId"), _ms(bill.get("ts"))
         hits = [a for a, b in self.bots.items()
                 if b.get("instId") == inst and _ms(b.get("cTime")) - BOT_GRACE_MS <= ts <= bot_end_ms(b) + BOT_GRACE_MS]
-        return hits[0] if len(hits) == 1 else None
+        if len(hits) == 1:
+            return hits[0]
+        ending = sorted((abs(ts - bot_end_ms(self.bots[a])), a) for a in hits
+                        if abs(ts - bot_end_ms(self.bots[a])) <= BOT_GRACE_MS)
+        if ending and (len(ending) == 1 or ending[0][0] < ending[1][0]):
+            return ending[0][1]
+        return None
+
+    def owner_by_position(self, bill: dict, category: str) -> Optional[Attr]:
+        """Исполнение без algoId (сработавший TP/SL, закрытие) уменьшает чью-то открытую
+        спот-позицию по instId: владелец — источник с такой позицией и самым свежим исполнением."""
+        pair = _spot_legs(bill.get("instId") or "", bill.get("instType") or "")
+        chg = _f(bill.get("balChg")) or 0.0
+        if not pair or abs(chg) < EPS or bill.get("ccy") not in pair:
+            return None
+        direction = chg if bill.get("ccy") == pair[0] else -chg  # знак изменения базы
+        owners = [(state[1], sleeve, source) for (inst, sleeve, source), state in self.open_positions.items()
+                  if inst == bill.get("instId") and state[0] * direction < 0 and abs(state[0]) > EPS]
+        if not owners:
+            return None
+        _, sleeve, source = max(owners)
+        return Attr(category, sleeve, source, "исполнение без algoId (TP/SL, закрытие) — владелец по открытой позиции instId")
+
+    def _track_position(self, bill: dict, attr: Attr) -> None:
+        pair = _spot_legs(bill.get("instId") or "", bill.get("instType") or "")
+        if attr.category != "trade" or not pair or bill.get("ccy") != pair[0]:
+            return
+        state = self.open_positions.setdefault((bill["instId"], attr.sleeve, attr.source), [0.0, 0])
+        state[0] += _f(bill.get("balChg")) or 0.0
+        state[1] = max(state[1], _ms(bill.get("ts")))
 
     def __call__(self, bill: dict) -> Attr:
+        attr = self._classify(bill)
+        self._track_position(bill, attr)
+        return attr
+
+    def _orphan(self, bill: dict, category: str) -> tuple[Optional[str], Optional[Attr]]:
+        """Исполнение с clOrdId «O + 19 цифр», ordId которого нет среди ордеров ботов.
+        Решение кэшируется по ordId: обе ноги и все части ордера идут к одному владельцу."""
+        key = bill.get("ordId") or ""
+        if key and key in self._orphan_by_order:
+            return self._orphan_by_order[key]
+        algo = self.bot_by_inst_time(bill)
+        decision = (algo, None) if algo else (None, self.owner_by_position(bill, category))
+        if key:
+            self._orphan_by_order[key] = decision
+        return decision
+
+    def _classify(self, bill: dict) -> Attr:
         bill_type = str(bill.get("type") or "")
         category = BILL_CATEGORY.get(bill_type, "other")
         if category in CAPITAL_CATEGORIES:
@@ -768,10 +864,13 @@ class Classifier:
         algo = self.order_map.get(ord_id) if ord_id else None
         note = ""
         if algo is None and BOT_CL_ORD_RE.match(cl):
-            algo = self.bot_by_inst_time(bill)
+            algo, by_position = self._orphan(bill, category)
+            if by_position is not None:
+                self.position_bills += 1
+                return by_position
             if algo is None:
                 self.orphan_bot_bills += 1
-                return Attr(category, self.default, "bot:?", "исполнение нативного бота без algoId")
+                return Attr(category, self.default, "bot:?", "исполнение без algoId: ни бота, ни открытой позиции")
             self.heuristic_bills += 1
             note = "бот опознан по instId и времени жизни"
         if algo:
@@ -854,6 +953,27 @@ def _spot_legs(inst_id: str, inst_type: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _fill_key(bill: dict) -> tuple:
+    """Ключ исполнения: ноги базы и котируемой валюты имеют общие instId, tradeId и ordId."""
+    trade_id = bill.get("tradeId") or ""
+    return ((bill.get("instId"), trade_id, bill.get("ordId")) if trade_id not in ("", "0")
+            else ("bill", bill.get("billId")))
+
+
+def _sells_unallocated(legs: dict, bill: dict, pool: dict) -> bool:
+    """Исполнение без меток (ордер человека) продаёт стартовый актив вне рукавов целиком из пула.
+
+    Это обмен стартовых активов, а не позиция рукава: иначе «Прочее/ручное» держит шорт
+    базы, «вне рукавов» — тот же актив в лонг, и каждый день обе строки переоцениваются
+    навстречу друг другу (02.10: OKB −100 → «ручное» +81 USDT без единой сделки).
+    """
+    pair = _spot_legs(bill.get("instId") or "", bill.get("instType") or "")
+    if not pair:
+        return False
+    sold = -legs.get(pair[0], 0.0)
+    return sold > EPS and pool.get(pair[0], 0.0) >= sold * (1 - 1e-9)
+
+
 # --- Отчёт ---
 
 @dataclass
@@ -874,6 +994,8 @@ class Inputs:
     own_snapshots: list[tuple[int, float]] = field(default_factory=list)
     owner_of: Optional[Callable[[str], Optional[str]]] = None
     registry_codes: list[str] = field(default_factory=list)
+    # цена валюты в USD по индексу OKX (как в totalEq); None — снимки в USD сверяются по споту
+    index_usd: Optional[Callable[[str, int], Optional[float]]] = None
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -895,8 +1017,14 @@ def build_report(inp: Inputs, rules: dict) -> dict:
     per, t0, t1 = inp.period, inp.period.start_ms, inp.period.t1_ms
     warnings, notes = list(inp.warnings), list(inp.notes)
     classify = Classifier(rules, inp.mode, inp.order_map, inp.bots, inp.owner_of)
-    bills = [b for b in inp.bills if _ms(b.get("ts")) <= inp.now_ms]
+    # по времени (устойчиво): классификатор ведёт открытые позиции источников
+    bills = sorted((b for b in inp.bills if _ms(b.get("ts")) <= inp.now_ms), key=lambda b: _ms(b.get("ts")))
     attrs = [classify(b) for b in bills]
+    # ноги исполнений без меток (ордер человека) — для решения «обмен стартовых активов»
+    unmarked_legs: dict[tuple, defaultdict] = defaultdict(_dd)
+    for bill, attr in zip(bills, attrs):
+        if attr.source == "unmarked" and attr.category == "trade":
+            unmarked_legs[_fill_key(bill)][bill.get("ccy") or "?"] += _f(bill.get("balChg")) or 0.0
 
     # стартовые остатки до начала журнала: eq сейчас минус все движения журнала
     sums: defaultdict = _dd()
@@ -911,12 +1039,25 @@ def build_report(inp: Inputs, rules: dict) -> dict:
         u_t0[ccy] += qty
         u_t1[ccy] += qty
     capital = {"transfer": _dd(), "strategy_transfer": _dd()}
+    conversions = _dd()              # обмен стартовых активов человеком за период (вне рукавов)
+    conversion_fills: dict[tuple, bool] = {}
     fills: dict[tuple, dict] = {}
     for bill, attr in zip(bills, attrs):
         ts = _ms(bill.get("ts"))
         if ts > t1:
             continue
         ccy, chg, in_period = bill.get("ccy") or "?", _f(bill.get("balChg")) or 0.0, ts >= t0
+        if attr.source == "unmarked" and attr.category == "trade":
+            key = _fill_key(bill)
+            if key not in conversion_fills:
+                conversion_fills[key] = _sells_unallocated(unmarked_legs[key], bill, u_t1)
+            if conversion_fills[key]:
+                u_t1[ccy] += chg
+                if in_period:
+                    conversions[ccy] += chg
+                else:
+                    u_t0[ccy] += chg
+                continue
         if attr.category in CAPITAL_CATEGORIES:
             u_t1[ccy] += chg
             if in_period:
@@ -937,10 +1078,7 @@ def build_report(inp: Inputs, rules: dict) -> dict:
             if attr.category in ("funding", "interest", "other"):
                 getattr(book, attr.category)[ccy] += chg
         if attr.category == "trade":
-            trade_id = bill.get("tradeId") or ""
-            key = ((bill.get("instId"), trade_id, bill.get("ordId")) if trade_id not in ("", "0")
-                   else ("bill", bill.get("billId")))
-            fill = fills.setdefault(key, {"book": book, "ts": ts, "inst": bill.get("instId") or "",
+            fill = fills.setdefault(_fill_key(bill), {"book": book, "ts": ts, "inst": bill.get("instId") or "",
                                           "inst_type": bill.get("instType") or "", "legs": _dd(),
                                           "gross": {}, "in_period": in_period})
             fill["legs"][ccy] += chg
@@ -1072,9 +1210,14 @@ def build_report(inp: Inputs, rules: dict) -> dict:
             h0_all[ccy] += qty
         for ccy, qty in book.h_t1.items():
             h1_all[ccy] += qty
+    # переоценка стартовых активов + результат их обмена человеком за период (по ценам конца)
     reval = sum(qty * ((p1(ccy) or 0.0) - (p0(ccy) or 0.0)) for ccy, qty in u_t0.items() if abs(qty) > EPS)
-    flows = {c: u_t1.get(c, 0.0) - u_t0.get(c, 0.0) for c in set(u_t0) | set(u_t1)}
-    capital_value = _value(flows, p1)
+    reval += _value(conversions, p1)
+    capital_flows = _dd()
+    for table in capital.values():
+        for ccy, qty in table.items():
+            capital_flows[ccy] += qty
+    capital_value = _value(capital_flows, p1)
     bal_t0 = {c: u_t0.get(c, 0.0) + h0_all.get(c, 0.0) for c in set(u_t0) | set(h0_all)}
     bal_t1 = {c: u_t1.get(c, 0.0) + h1_all.get(c, 0.0) for c in set(u_t1) | set(h1_all)}
     model_t0, model_t1 = _value(bal_t0, p0), _value(bal_t1, p1)
@@ -1103,10 +1246,17 @@ def build_report(inp: Inputs, rules: dict) -> dict:
         warnings.append("боты без правила в ops/sleeves.json -> «" + rules["sleeves"][classify.default]["title"]
                         + "»: " + ", ".join(sorted(classify.unmapped_bots)))
     if classify.orphan_bot_bills:
-        warnings.append(f"исполнений нативных ботов без algoId: {classify.orphan_bot_bills} bills "
-                        "(sub-orders не дали ordId) — в «прочее/ручное»")
+        warnings.append(f"исполнений без algoId (clOrdId «O» + 19 цифр): {classify.orphan_bot_bills} bills — "
+                        "ни бота по instId и времени, ни открытой позиции владельца; в «прочее/ручное»")
     if classify.heuristic_bills:
         notes.append(f"{classify.heuristic_bills} bills ботов опознаны по instId и времени (нет ordId в sub-orders)")
+    if classify.position_bills:
+        notes.append(f"{classify.position_bills} bills без algoId (сработавшие TP/SL, закрытия) отнесены к владельцу "
+                     "открытой позиции по instId")
+    if any(conversion_fills.values()):
+        notes.append(f"обмен стартовых активов без меток (ордер человека): {sum(conversion_fills.values())} "
+                     "исполнений учтены «вне рукавов», а не позицией «Прочее/ручное»"
+                     + (f"; за период {_holdings(_nonzero(conversions))}" if _nonzero(conversions) else ""))
     if classify.unknown_types:
         warnings.append("нераспознанные типы bills (type/subType: число) -> «прочее/ручное»: "
                         + ", ".join(f"{k}: {v}" for k, v in sorted(classify.unknown_types.items())))
@@ -1147,6 +1297,7 @@ def build_report(inp: Inputs, rules: dict) -> dict:
             "capital_flows_usdt": _r(capital_value),
             "transfers": _nonzero(capital["transfer"]),
             "strategy_transfers_net": strategy_net,
+            "conversions": _nonzero(conversions),
         },
         "bots": bot_rows,
         "equity": {
@@ -1182,7 +1333,10 @@ def _exchange_check(inp: Inputs, bills: list[dict], opening: dict[str, float], m
 
     Эталон A — самый ранний снимок, согласованный с моделью (<= 5%); конец B —
     asset-valuation trading сейчас (текущий период) или последний снимок до t1.
-    Невязка = Δ биржи − Δ модели на [A, B]: цены (индекс против last), время снимков.
+    Модель в каждой точке оценивается ценами источника снимка: totalEq движка (USD) —
+    индексами <ccy>-USD, как считает биржа; снимки в USDT (asset-valuation) — ценами спота.
+    Невязка = Δ биржи − Δ модели на [A, B]; больше 0.2% equity — предупреждение.
+    Расхождение цен demo-спота с индексом — отдельной строкой (price_basis_usdt).
     """
     t0, t1 = per.start_ms, per.t1_ms
     unit = ENGINE_EQUITY_UNIT.get(inp.mode, "USD")
@@ -1193,6 +1347,7 @@ def _exchange_check(inp: Inputs, bills: list[dict], opening: dict[str, float], m
         notes.append("снимков equity биржи внутри периода нет — проверка только уровнем на конец периода")
         return None
     ordered = sorted(bills, key=lambda b: _ms(b.get("ts")))
+    spot_fallback: set[str] = set()
 
     def balances_at(ts_ms: int) -> dict[str, float]:
         bal = defaultdict(float, opening)
@@ -1208,6 +1363,25 @@ def _exchange_check(inp: Inputs, bills: list[dict], opening: dict[str, float], m
         rate = inp.usdt_usd(ts_ms)
         return value / rate if rate else None
 
+    def models(bal: dict[str, float], ts_ms: int, unit_: str) -> tuple[float, float, str]:
+        """(модель в ценах источника снимка, модель по споту, метод) — в USDT."""
+        spot = _value(bal, lambda ccy: inp.price(ccy, ts_ms))
+        rate = inp.usdt_usd(ts_ms) if unit_ != USDT and inp.index_usd is not None else None
+        if not rate:
+            return spot, spot, "spot"
+        usd = 0.0
+        for ccy, qty in bal.items():
+            if abs(qty) <= EPS:
+                continue
+            spot_px = inp.price(ccy, ts_ms) or 0.0
+            px = inp.index_usd(ccy, ts_ms) if abs(qty * spot_px) >= INDEX_MIN_VALUE_USDT or ccy == USDT else None
+            if px is None:
+                px = spot_px * rate
+                if abs(qty * spot_px) >= INDEX_MIN_VALUE_USDT:
+                    spot_fallback.add(ccy)
+            usd += qty * px
+        return usd / rate, spot, "index"
+
     now_prices = lambda ccy: inp.price(ccy, inp.now_ms)  # noqa: E731
     skipped = 0
     ref = None
@@ -1217,12 +1391,13 @@ def _exchange_check(inp: Inputs, bills: list[dict], opening: dict[str, float], m
         if not approx or abs(value - approx) / approx > PREFILTER_DEVIATION:
             skipped += 1
             continue
-        model = _value(bal, lambda ccy, _ts=ts: inp.price(ccy, _ts))
         usdt = to_usdt(value, unit_, ts)
+        model, spot, method = models(bal, ts, unit_)
         if usdt is None or not model or abs(usdt - model) / model > REF_MAX_DEVIATION:
             skipped += 1
             continue
-        ref = {"ts": _iso(ts, per.tz), "source": source, "exchange_usdt": usdt, "model_usdt": model, "_ms": ts}
+        ref = {"ts": _iso(ts, per.tz), "source": source, "exchange_usdt": usdt, "model_usdt": model,
+               "model_spot_usdt": spot, "pricing": method, "_ms": ts}
         break
     if skipped:
         notes.append(f"пропущено снимков equity, несопоставимых с моделью (> {REF_MAX_DEVIATION:.0%}): {skipped}")
@@ -1232,28 +1407,43 @@ def _exchange_check(inp: Inputs, bills: list[dict], opening: dict[str, float], m
     trading = ((inp.valuation or {}).get("details") or {}).get("trading")
     if abs(t1 - inp.now_ms) <= PRICE_NOW_TOLERANCE_MS and trading:
         end = {"ts": _iso(inp.now_ms, per.tz), "source": "asset-valuation trading", "exchange_usdt": trading,
-               "model_usdt": model_t1}
+               "model_usdt": model_t1, "model_spot_usdt": model_t1, "pricing": "spot"}
     else:
         for ts, value, source, unit_ in reversed(cands):
             if ts <= ref["_ms"]:
                 break
             usdt = to_usdt(value, unit_, ts)
-            model = _value(balances_at(ts), lambda ccy, _ts=ts: inp.price(ccy, _ts))
+            model, spot, method = models(balances_at(ts), ts, unit_)
             if usdt and model and abs(usdt - model) / model <= REF_MAX_DEVIATION:
-                end = {"ts": _iso(ts, per.tz), "source": source, "exchange_usdt": usdt, "model_usdt": model}
+                end = {"ts": _iso(ts, per.tz), "source": source, "exchange_usdt": usdt, "model_usdt": model,
+                       "model_spot_usdt": spot, "pricing": method}
                 break
     if end is None:
         return None
     d_exchange = end["exchange_usdt"] - ref["exchange_usdt"]
     d_model = end["model_usdt"] - ref["model_usdt"]
+    d_spot = end["model_spot_usdt"] - ref["model_spot_usdt"]
     residual = d_exchange - d_model
     base = end["exchange_usdt"] or 1.0
+    residual_pct = residual / base * 100
     ref.pop("_ms")
+    if abs(residual_pct) > RESIDUAL_WARN_PCT:
+        warnings.append(f"невязка с биржей по снимкам equity {residual:+.2f} USDT ({residual_pct:+.3f}% equity) "
+                        f"больше {RESIDUAL_WARN_PCT}%: изменение счёта не объяснено bills — "
+                        "проверить журнал и цены (insights/pnl-ledger.md §4)")
+    if spot_fallback:
+        notes.append("нет индекса <ccy>-USD для " + ", ".join(sorted(spot_fallback))
+                     + " — в сверке со снимками в USD эти валюты оценены по споту")
+    if abs(d_model - d_spot) >= 0.01:
+        notes.append(f"сверка со снимками идёт по ценам их источника: индекс биржи против цен demo-спота "
+                     f"даёт {d_model - d_spot:+.2f} USDT за [A, B] (невязка по споту {d_exchange - d_spot:+.2f})")
     path = _equity_path([v for ts, v, s, u in cands if ts >= _ms_from_iso(ref["ts"]) and s == ref["source"]])
     return {"from": {k: (_r(v, 4) if isinstance(v, float) else v) for k, v in ref.items()},
             "to": {k: (_r(v, 4) if isinstance(v, float) else v) for k, v in end.items()},
             "exchange_delta_usdt": _r(d_exchange, 4), "model_delta_usdt": _r(d_model, 4),
-            "residual_usdt": _r(residual, 4), "residual_pct": _r(residual / base * 100, 5),
+            "residual_usdt": _r(residual, 4), "residual_pct": _r(residual_pct, 5),
+            "model_spot_delta_usdt": _r(d_spot, 4), "price_basis_usdt": _r(d_model - d_spot, 4),
+            "residual_spot_usdt": _r(d_exchange - d_spot, 4), "warn_pct": RESIDUAL_WARN_PCT,
             "equity_path": path}
 
 
@@ -1342,10 +1532,18 @@ def render_markdown(report: dict) -> str:
                      f"{_money(lc['diff_usdt'])} ({lc['diff_pct']}%).")
     check = eq.get("check")
     if check:
+        pricing = {"index": "индексы <ccy>-USD, как totalEq", "spot": "цены спота"}
         lines += ["", f"**Проверка по снимкам биржи** {check['from']['ts']} ({check['from']['source']}) → "
                       f"{check['to']['ts']} ({check['to']['source']}): Δ биржи {_money(check['exchange_delta_usdt'])}, "
-                      f"Δ модели {_money(check['model_delta_usdt'])}, невязка {_money(check['residual_usdt'])} "
-                      f"({check['residual_pct']}% equity)."]
+                      f"Δ модели {_money(check['model_delta_usdt'])} "
+                      f"(оценка: {pricing.get(check['from'].get('pricing'), 'цены спота')}), "
+                      f"невязка {_money(check['residual_usdt'])} ({check['residual_pct']}% equity, "
+                      f"порог предупреждения {check.get('warn_pct', RESIDUAL_WARN_PCT)}%)."]
+        if check.get("price_basis_usdt"):
+            lines.append(f"Цены demo-спота против индекса: {_money(check['price_basis_usdt'])} за тот же отрезок "
+                         f"(Δ модели по споту {_money(check.get('model_spot_delta_usdt'))}, невязка по споту "
+                         f"{_money(check.get('residual_spot_usdt'))}) — не PnL, а разница оценки; см. "
+                         "insights/pnl-ledger.md §4.")
         if check.get("equity_path"):
             path = check["equity_path"]
             lines.append(f"Макс. просадка по снимкам: {path['max_drawdown_pct']}% ({path['snapshots']} снимков).")
@@ -1353,6 +1551,8 @@ def render_markdown(report: dict) -> str:
                  + ("" if rec["history_from_account_start"] else f" (остатки до журнала: {_holdings(rec['opening_balances'])})"))
     if report["bots"]:
         lines += ["", "## Нативные боты", "",
+                  "PnL OKX (`totalPnl`) — на момент формирования отчёта, PnL ledger — на конец периода: "
+                  "для прошедшего дня разница включает движение цены после его конца.", "",
                   "| algoId | рукав | пара | тип | состояние | вложено | PnL OKX | PnL ledger | Δ |",
                   "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         titles = {r["sleeve"]: r["title"] for r in report["sleeves"]}
@@ -1474,7 +1674,7 @@ def run(mode: Optional[str] = None, day: Optional[date] = None, days: int = 1, t
         total_eq_usd=account["total_eq_usd"], valuation=valuation, earn=earn, price=prices, usdt_usd=usd,
         engine_curve=engine_curve, own_snapshots=journal.snapshots(period.start_ms, period.t1_ms),
         owner_of=resolver, registry_codes=registry_codes() if owner_of == "auto" else [],
-        warnings=warnings, notes=notes)
+        warnings=warnings, notes=notes, index_usd=IndexBook(reader, now_ms, warnings))
     report = build_report(inputs, rules)
     report["sources"].update({"bills_sync": bills_stats, "bots_sync": bots_stats, "api_calls": reader.calls,
                               "journal": str(journal.path)})

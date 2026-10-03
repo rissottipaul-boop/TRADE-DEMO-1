@@ -17,6 +17,8 @@ data/
 *.sqlite3
 *.db
 logs/
+tmp*/
+
 
 # IDE
 .vscode/
@@ -32,3 +34,6 @@ logs/
 .obsidian/workspace-mobile.json
 .trash/
 
+
+# Brud Code workspace history
+.brud/

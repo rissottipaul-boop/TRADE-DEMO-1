@@ -16,6 +16,7 @@
 | `src/dca_bot.py` | Спот-DCA (demo) |
 | `src/agent_context.py` | Адресное чтение доски для агентов (AGENT-TOKEN-ECONOMY): карточка задачи дословно, транзитивные зависимости, активные claims, дубликаты ID; разбор — `ops/hooks/autopilot.py`, без записи и сети |
 | `src/control_panel.py` + `ops/control-panel/` | Локальный веб-пульт «Контур»: доска, рантаймы, движок, риск, очередь Muse, единая активность и курсор локальных событий; allowlist ops-действий, localhost + токен, без Flowise — [инструкция](control-panel/README.md) |
+| `src/morphy_project.py` + `ops/morphy/` | Экран общего проекта в локальном Morphy: read-only проекция единой доски, карточки задач, риск/движок, equity, AI-рантаймы, очередь Muse, Netdata, Obsidian, Telegram, Git и модули. API требует существующую сессию Morphy; не запускает агентов и не меняет торговлю — [инструкция](morphy/README.md) |
 | `src/worktree_lease.py` | Резервирование задачи и изолированного Git worktree от чистого HEAD, heartbeat и инспекция регистрации; не запускает агента и не освобождает lease автоматически |
 | `src/guard_adapter.py` | Адаптер hook-вызовов Codex / Gemini CLI / Muse Code к `ops/hooks/guard.py` (AGENT-GUARD-COMPAT): `apply_patch` в `command`, `cmd`/argv, вложенные вызовы, `BeforeTool`, пути WSL, корень с пробелами; ответ в формате клиента, правил не содержит. Hooks пока не вызывают: патч `insights/guard-compat-patch.diff` переносит его в `ops/hooks/` (решение человека, [guard-compat.md](../insights/guard-compat.md)) |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
@@ -27,6 +28,7 @@
 | `src/pump_journal.py` | Журнал памп-кармана (PUMP-JOURNAL): схема строк `entry`, `stop`, `exit`, `error` (v=1) рядом со строкой `scan` сканера; остаток бюджета, дневной PnL (сутки UTC), просадка, открытые позиции и риск до стопов против `pump-pocket.json` — только чтение |
 | `src/obsidian_status.py` | Снимок состояния для пульта Obsidian (OBSIDIAN-STATUS, схема v2): движок и прогресс P1-72H, риск, флаги, памп-карман, дежурство ops (live-окно, карман, сторож, guard), история equity → `data/obsidian/status.json`; без сети, только чтение, запись атомарная |
 | src/funding_carry.py | Дельта-нейтральный Funding Carry арбитраж (спот long + своп short 1x isolated, окупаемость 4 ног) — insights/funding-carry.md |
+| `src/funding_archive.py` | Архив истории funding OKX глубже окна API ≈ 94 дня (CARRY-FUNDING-ARCHIVE). Источник — только публичный live `GET /api/v5/public/funding-rate-history`, без ключей; demo-ряд не архивируется. Пагинация назад через `after`. Каждый запуск выкачивает всё окно API и пишет его в `data/funding_history.db` одной транзакцией на инструмент: `INSERT OR IGNORE` по (inst_id, funding_time), поэтому нет дублей, пропуски внутри окна дозаполняются, старые строки не переписываются. Ряд для бэктестов и CARRY-IMPL — `load_series(conn, inst_id)`. Ордеров нет |
 | src/mean_reversion.py | Сигнальная стратегия Mean Reversion (RSI(14) + BB(20, 2), ATR-стоп, minimal ROI, спот) — insights/meanrev-strategy-design.md |
 | src/treasury.py | Казначейский модуль ликвидности (Idle Cash Earn: Simple Earn, буфер резерва, мгновенный возврат под маржу) — insights/idle-cash-earn.md |
 | src/grid_engine.py | Собственная grid-стратегия с жестким Stop-Out при выходе из диапазона и перестановкой уровней — insights/grid-strategy-design.md |
@@ -34,6 +36,7 @@
 | src/copy_trader.py | Менеджер OKX Copy Trading / Lead Bots: профит-шеринг 30%, аудит условий лида — insights/copy-trading.md |
 | ops/deploy-vps.ps1, ops/deploy-vps.sh | Скрипты развертывания 24/7 VPS, проверка NTP/латентности, бэкап баз SQLite — insights/deploy-vps.md |
 | `src/netdata_monitor.py` | Модуль проверки здоровья и метрик Netdata (NETDATA-MONITOR): опрос `/api/v1/info`, сбор версии, ядер CPU, алертов (критичные/предупреждения); CLI `python -m src.netdata_monitor` — [insights/netdata-monitoring.md](../insights/netdata-monitoring.md) |
+| `src/notify.py` | Алерты Sentinel (ALERTS-IMPL): уровни INFO/WARNING/CRITICAL, Telegram через urllib (токены из env, fallback в `data/alerts.jsonl`), дедупликация по alert_key с cooldown; CLI `python -m src.notify --test "…" / --status` |
 | `ops/netdata/docker-compose.yml`, `ops/netdata.ps1` | Инфраструктура мониторинга Netdata: локальный docker-compose сервиса `netdata`, PowerShell-скрипт управления (`start`, `stop`, `restart`, `status`, `url`, `logs`) на порту 19999 |
 | Дубли консолидированы (ARCH-DEDUP): `state.py` и `ws_public.py` удалены, канон — `storage.py` + `ws_client.py` | |
 
@@ -51,6 +54,7 @@
 | Чьи ордера на счёте | `python -m src.order_audit [--hours 24]` — 0: норма, 1: есть ордер без метки агента или кода, 2: ошибка чтения |
 | Реестр и новый clOrdId | `python -m src.order_owner`, `python -m src.order_owner new trd` |
 | PnL по рукавам | `python -m src.pnl_ledger [--date YYYY-MM-DD] [--days 7] [--mode live]` — 0: норма, 1: есть предупреждения, 2: отчёт не построен |
+| Архив funding (без ключей) | `python -m src.funding_archive sync` или `status` с ключами `[--inst <instId> …] [--db <файл>] [--json]`; по умолчанию BTC- и ETH-USDT-SWAP. 0 — норма; 1 — предупреждения: пропуск в ряду, невосстановимый разрыв (окно API ушло дальше прошлого запуска), архив пуст или последний период старше 30 дней; 2 — ошибка сети, API или архива, запись не делается. **Расписание:** `sync` не реже раза в 30 дней (окно API ≈ 94–96 дней, запас ×3). Задача доски FUNDING-ARCHIVE-SYNC (`scheduled`, каждые 14 дней) переставляет себя после каждого запуска. Для автозапуска без агента человек может зарегистрировать задачу Планировщика Windows: `schtasks /Create /TN "OKX-Bot Funding Archive" /SC WEEKLY /D MON /ST 09:00 /TR "cmd /c cd /d \"<корень>\" && .venv\Scripts\python.exe -m src.funding_archive sync >> logs\funding_archive.log 2>&1"`. Регистрация задач Планировщика — решение человека, как и `autostart.ps1 register` |
 | Бэктест | `python -m src.backtest baseline …` / `run …` (публичные свечи OKX, без ключей); mean-reversion — `python -m src.backtest.meanrev --out insights/meanrev-backtest.md` |
 | Режим аккаунта | `python -m src.account_mode status` (только чтение), `precheck --acct-lv N` (только чтение), `switch --acct-lv N` (только demo; при блокерах precheck не переключает) |
 | Памп-скан (без ключей) | `python -m src.pump_scanner --exclude <базы флота> [--json] [--no-journal]`; повтор сканов 24.09: `--feed demo --at 2026-09-24T09:47+05:00 --pairs OKB-USDT …` — 0: скан выполнен, 2: ошибка данных или сети |
@@ -59,9 +63,13 @@
 | Ротация AI-агента | `ops\agent-rotate.ps1` — авто (Claude → Antigravity → Muse → Codex), `-Role <роль>` (приоритеты и модели из `ops/agent-routing.json`), `-TaskId`, `-SkipAgent`, `-Plan`, `-Headless`, `-Prompt "..."` — [agent-team.md](agent-team.md) |
 | Адресное чтение доски | `python -m src.agent_context` — обзор без критериев; `--task <ID>` — полная карточка, зависимости, все активные claims; `--stats` — байты до/после. 0 — ок, 2 — доску читать напрямую. Правила — [token-economy.md](token-economy.md) |
 | Локальная панель | `.venv\Scripts\python.exe -m src.control_panel [--port 8765]` — ссылка с токеном, только 127.0.0.1; [действия и API](control-panel/README.md) |
+| Morphy: данные проекта | `.venv\Scripts\python.exe -m src.morphy_project [--task ID]` — JSON-проекция без секретов и сырых логов; только чтение. `ops\morphy\deploy-project.ps1` устанавливает собственные компоненты в workspace версии 0.5.0 |
+| Morphy: локальная копия | `ops\morphy\trial.ps1 start / status / stop` — Node 22, отдельное состояние, только localhost 7480; допускает настроенный человеком AI, запрещает relay и кошелёк; профили не меняет |
 | Делегирование Muse | `ops\delegate.ps1 status / start / stop / submit -Prompt "…" -From <рантайм> -Role <роль> / fetch -Id <id>` — [delegations/README.md](delegations/README.md) |
 | Управление Netdata | `ops\netdata.ps1 status` / `start` / `stop` / `restart` / `url` / `logs` — управление локальным контейнером Netdata (порт 19999) |
 | Метрики Netdata | `python -m src.netdata_monitor [--json]` — опрос API Netdata (/api/v1/info), статус, ядра CPU, алерты |
 
 | Файл | Назначение |
 | --- | --- |
+| `ops/panel.ps1` | Фоновый запуск панели «Контур» (PANEL-LAUNCHER): `start` / `status` / `stop` / `restart` / `open` / `url [-ShowToken]`; свой процесс — по PID + время создания + nonce, токен только в `data\control_panel_token.dpapi` (DPAPI) — [инструкция](control-panel/README.md#фоновый-запуск) |
+| `src/control_panel_boot.py` | Загрузчик панели для `ops/panel.ps1` (PANEL-LAUNCHER-SEC): расшифровка DPAPI-токена, stdout в `os.devnull` / stderr в лог, запуск `src.control_panel.main` |

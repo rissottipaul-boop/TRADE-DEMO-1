@@ -1,0 +1,8 @@
+{
+  "created": "2026-10-03T07:44:38+05:00",
+  "timeout_min": 20,
+  "role": "insight-executor",
+  "id": "d20261003-074438-4CE1",
+  "from": "orchestrator",
+  "prompt": "Задача 27 (PANEL-LAUNCHER-DOCS): Описать ops/panel.ps1 и src/control_panel_boot.py в README панели (ops/control-panel/README.md) и карте кода (ops/code-map.md). В README добавь раздел «Фоновый запуск» с командами start, status, stop, restart, open, url -ShowToken, описание защиты DPAPI токена и коды выхода status (0 - здорова, 1 - ошибка). В ops/code-map.md добавь строки для ops/panel.ps1 и src/control_panel_boot.py. Проверь форматирование."
+}

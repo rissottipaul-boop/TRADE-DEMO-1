@@ -1,0 +1,132 @@
+# Morphy — локальная пробная копия
+
+Проверено 03.10.2026 на Windows. Версия `morphyagent@0.5.0`, отдельный
+Node `22.23.3`. Установлен экран общего проекта внутри workspace Morphy.
+
+Открыть: **http://127.0.0.1:7480**. Человек подключил OpenAI и задал пароль.
+Экран проекта использует этот вход. Новая вкладка/профиль браузера может потребовать
+повторного входа; пароль агенту или в чат передавать не нужно.
+
+## Экран проекта
+
+- **Обзор:** equity, результат дня, просадка, график капитала, риск, движок,
+  вопросы человеку и текущие claims.
+- **Задачи:** поиск по ID/теме/агенту, фильтр статуса, зависимости, критерий и
+  заметки в карточке, копирование карточки.
+- **Агенты:** Claude/Codex/Gemini/Muse, модели из реестра, доступность CLI,
+  текущие задачи, метаданные очереди Muse. Наличие claim не означает живую сессию.
+- **Интеграции:** OKX, Morphy, четыре рантайма, Netdata с переходом в панель,
+  Obsidian, Telegram, сторож, Skills/роли; Git и GitHub CLI; наличие модулей
+  рынка/стратегий, ботов OKX, казначейства, PnL, бэктестов и VPS.
+- **Знания и события:** последние заголовки исследований, статусы,
+  заголовки инцидентов и список новых ответов из Obsidian.
+
+Данные обновляются каждые 15 секунд, серверный кеш — 10 секунд. Устаревший
+снимок помечается. API использует allowlist полей, не отдаёт сырые логи,
+credentials, prompt и ответы моделей из очереди. Запросы без действующей
+сессии Morphy возвращают 401; чужой Host/Origin — 403; запись — 405.
+
+Карточки интеграций обозначают источник и качество проверки. Наличие файла/CLI
+не приравнивается к работающему подключению. Для Telegram показан статус задач
+ALERTS-TG/ALERTS-IMPL; внешние сообщения не отправляются. Данные OKX — локальное
+состояние demo-движка, а не свежая сверка с биржей.
+
+Существующий «Контур», доска и пользовательские заметки не заменены и не изменяются
+через этот экран. Торговые действия и управление сессиями агентов здесь пока отсутствуют.
+
+Из корня проекта:
+
+```powershell
+ops\morphy\trial.ps1 status
+ops\morphy\trial.ps1 start
+ops\morphy\trial.ps1 stop
+ops\morphy\deploy-project.ps1
+```
+
+`start` запускает процесс скрыто. `stop` проверяет путь исполняемого файла и
+командную строку перед завершением пробного процесса вместе с его потомками.
+Запуск отказывается работать при занятых портах 7480/7482/7484. Данные сохраняются.
+
+## Устройство
+
+- Пакет и зависимости: `data/morphy-eval/package/`.
+- Переносимый Node: `data/morphy-eval/node-v22.23.3-win-x64/`.
+- Состояние: `data/morphy-eval/home/.morphy/`, отдельно от настоящего профиля человека.
+- Рабочее приложение: `data/morphy-eval/package/workspace/`.
+- Логи: `logs/morphy-trial.out.log`, `logs/morphy-trial.err.log`.
+- Первичные результаты smoke: `data/morphy-eval/smoke.json`.
+
+`bootstrap.mjs` направляет `os.homedir()` в отдельный каталог и сужает
+TCP-привязки Node-серверов до `127.0.0.1`. Bootstrap наследуется backend через
+`NODE_OPTIONS`; исходное окружение вызывающего PowerShell восстанавливается.
+Это разделение состояния и сетевых портов, **не файловая песочница**.
+
+В копии отключены relay и PULSE, CRONS пуст. AI настроен человеком.
+`start` поддерживает настроенные openai/anthropic/ollama/pi, но не включает их сам.
+Он по-прежнему отклоняет relay и кошелёк. Учётные данные человека не копировались
+агентом; ключи OKX в веб-ответ не входят.
+
+Собственные компоненты хранятся в Git: `src/morphy_project.py`,
+`ops/morphy/ProjectDashboard.tsx`, `project.css`, `project-backend.ts`.
+`deploy-project.ps1` копирует компоненты в установленный workspace и точечно
+подключает их в native App/Sidebar/backend. Оригинальная демонстрационная
+страница Morphy доступна на `/morphy-dashboard`. Скрипт рассчитан на 0.5.0;
+после обновления upstream требуется сверка, затем повторный deploy.
+
+В скачанных исходниках исправлен Windows file URL в `supervisor/backend.ts`
+через `pathToFileURL(backendPath).href`. В `supervisor/index.ts` исключены три
+автоматических вызова `killPort` при старте. Лицензия upstream сохранена в пакете.
+Обновление Morphy может затереть эти локальные изменения; автоматическое
+обновление не проверялось.
+
+## Установка, которая была выполнена
+
+1. `npm.cmd pack morphyagent@0.5.0 --ignore-scripts --pack-destination data/morphy-eval --silent`;
+   архив распакован штатным `tar`.
+2. В каталоге пакета: `npm.cmd ci --omit=dev --ignore-scripts --legacy-peer-deps --no-audit --no-fund`.
+   Upstream `postinstall`, меняющий настоящий `~/.morphy`, не запускался.
+3. Node 22 скачан с `nodejs.org/dist`, SHA256 сравнен с официальным `SHASUMS256.txt`.
+4. С переносимым Node 22 в PATH: `npm.cmd rebuild better-sqlite3` в пакете;
+   в `workspace/` — `npm.cmd install --omit=dev --ignore-scripts --no-audit --no-fund`
+   и `npm.cmd rebuild better-sqlite3`.
+5. Применены описанные выше изменения пробной копии; создана пустая конфигурация
+   без провайдера, relay и кошелька, порт 7480.
+
+Проверки зависимостей: `logs/morphy-install.log`, `logs/morphy-native-install.log`,
+`logs/morphy-workspace-install.log`. Код пакета не включён в исходники проекта;
+для восстановления нужны архив, зависимости и перечисленные изменения.
+
+## Что остаётся
+
+Человек выполнил настройку аккаунта; задача `MORPHY-ACCOUNT` закрыта.
+Основание самостоятельного входа: [AGENTS.md](../../AGENTS.md), §2 — секреты
+и профили относятся к решениям человека. Для проверочной вкладки отдельно
+создана `MORPHY-VERIFY-LOGIN` на [доске](../board.md).
+
+## Guard проекта (MORPHY-GUARD-WIRE)
+
+AI-агент Morphy подключён к общему guard проекта. Мост `guard-hook.mjs`
+вызывает `ops/hooks/guard_adapter.py --client claude` (инструменты Read/Write/
+Edit/Bash обоих harness зеркалят формат Claude Code); правил в мосте нет,
+решения принимает `ops/hooks/guard.py`, отказы пишутся в `data/guard.log`.
+`deploy-guard.ps1` копирует мост в установленный пакет и точечно подключает:
+
+- `supervisor/harnesses/claude.ts` — `hooks: guardHooks()` (PreToolUse hook
+  Claude Agent SDK) во все три `query()`-сайта: живой разговор, one-shot
+  pulse/cron/customer, agent-API;
+- `supervisor/harnesses/pi/session.ts` — pre-check `piGuardDeny` в `executeTool`.
+
+Проверка канарейками (`node ops/morphy/guard-hook.test.mjs`) гоняет
+задеплоенный мост: `echo guard-e2e-ok` проходит, `echo withdraw-canary` и
+запись в `.github/hooks/` отклоняются с `[guard]`. Контракт guard сохранён:
+мост fail-open, сбой адаптера не роняет supervisor. Harness Codex
+(provider `openai`) через app-server мостом НЕ покрыт — при переключении
+провайдера на openai guard не действует (см. оценку ниже). После обновления
+upstream деплой повторить; скрипт идемпотентен и сверяет версию 0.5.0.
+
+До использования Morphy как исполнителя задач проекта harness Codex требует
+отдельной проверки поддержки проектных ограничений. Чтение данных для панели
+подключено отдельно, без запуска агентов.
+
+Полный результат, лицензия, стоимость и ограничения:
+[оценка Morphy](../../insights/morphy-local-evaluation.md).

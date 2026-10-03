@@ -329,24 +329,62 @@ L — эффективное плечо = нотионал позиции / ма
 ### С6. Сигнальный бот (contract signal)
 
 - **Механика.**
-  - Канал сигналов: `signal/create-signal` возвращает `signalChanId` и `signalChanToken`.
+  - Канал сигналов: `signal/create-signal` возвращает `signalChanId` и `signalChanToken`. Один канал — один бот `signal/order-algo` (HUNT-SIGNAL-BOT, задача 194).
   - Бот: `signal/order-algo` с параметрами:
-    - `signalChanId`, `instIds` или `includeAll`;
-    - `lever`, `investAmt`;
+    - `signalChanId`, `instIds` (например `BTC-USDT-SWAP`) или `includeAll`;
+    - `lever`, `investAmt` (маржа бота, см. режим маржи ниже);
     - `subOrdType`: 1 — limit, 2 — market, 9 — TradingView;
     - `entrySettingParam`: `allowMultipleEntry`, `entryType` 1–5, `amt` или `ratio`;
     - `exitSettingParam`: `tpSlType` pnl или price, `tpPct`, `slPct`.
-  - Сигнал можно прислать двумя путями:
-    - webhook с JSON: `action` ENTER_LONG, ENTER_SHORT, EXIT_LONG или EXIT_SHORT, `instrument`, `signalToken`, `timestamp`, `maxLag`, `investmentType`, `amount`. Адрес — `https://www.okx.com/algo/signal/trigger`, на demo — `…/pap/algo/signal/trigger` [И6 alert message spec; И7];
-    - REST: `signal/sub-order` (market или limit, `reduceOnly`) и `signal/close-position` [И1].
+  - Управление дальше: `signal/amendTPSL`, `signal/margin-balance`, `signal/set-instruments`; чтение — `signal/orders-algo-details` (`totalEq`, `floatPnl`, `realizedPnl`) и `signal/positions` (§1.1).
+- **1. Формат webhook (≥ 2 источника: [И6] Alert Message Spec + [И7] практика настройки; REST-альтернатива — [И1] `signalBot/`).**
+  - Официальный путь — TradingView alert → webhook OKX. JSON-структура alert-сообщения (поля по [И6], значения действий подтверждены [И7]):
+    - `action`: `ENTER_LONG` | `ENTER_SHORT` | `EXIT_LONG` | `EXIT_SHORT`;
+    - `instrument`: например `BTC-USDT-SWAP`;
+    - `signalToken`: секрет канала (`signalChanToken` из `create-signal`), аутентифицирует отправителя;
+    - `timestamp`: время генерации сигнала (для контроля свежести на стороне получателя);
+    - `maxLag`: макс. допустимая задержка сигнала в секундах — просроченный сигнал отбрасывается;
+    - `orderType`: `market` | `limit`;
+    - `price`: цена для `limit` (для `market` игнорируется);
+    - `investmentType`: `percentage` | `margin_amount` | `contracts` — в чём выражен `amount`;
+    - `amount`: размер входа в единицах `investmentType`.
+  - Эндпоинты webhook:
+    - live: `https://www.okx.com/algo/signal/trigger`;
+    - demo: `https://www.okx.com/pap/algo/signal/trigger`.
+  - Альтернативный REST-путь (приватный API, [И1] `signalBot/placeSubOrder`, `closePosition`):
+    - `signal/sub-order` — программная отправка сигнала без TradingView: market или limit, флаг `reduceOnly` для выходов;
+    - `signal/close-position` (`algoId`, `instId`) — точечное закрытие позиции сигнального бота.
+  - Для проекта предпочтителен REST-путь (`sub-order`): код вызывает `risk.check_entry_allowed` и только после этого шлёт сигнал; TradingView-webhook остаётся внешним вариантом с тем же JSON-контрактом.
+- **2. Что происходит с позициями после `signal/stop-order-algo` (уточнение задачи 194).**
+  - В API `signal/stop-order-algo` **нет параметра `stopType`** — в отличие от `grid/stop-order-algo` и `dca/stop` (у тех `stopType` 1 — закрыть позиции рынком, 2 — оставить; §1.1, §1.5).
+  - Следствие: при остановке сигнального бота **открытые позиции НЕ закрываются биржей автоматически**, а остаются открытыми деривативными позициями аккаунта (аналог поведения grid/dca со `stopType 2`, но без выбора).
+  - Для закрытия остатка требуется отдельный вызов:
+    - `signal/close-position` (`algoId`, `instId`) — штатный путь;
+    - либо аварийный `trade/close-position` — вне семейства signal.
+  - Предыдущая формулировка «неизвестно, что будет с позициями» (§9 п. 11, старая версия С6) заменяется этим правилом; **осталось проверить на demo** фактом (план ниже, п. 5 сценария).
+- **3. Режим маржи.**
+  - Только **изолированная маржа (isolated)**: маржа бота выделяется из `investAmt` при создании через `signal/order-algo`.
+  - Плечо `lever` **жёстко задаётся при создании** и дальше не меняется настройками бота (правка — только TP/SL через `signal/amendTPSL`, маржа через `signal/margin-balance`, инструменты через `signal/set-instruments`).
+  - Лимит проекта: **плечо ≤ 3x** (инвариант [business-plan.md](business-plan.md) §7; первая волна — ≤ 2x по §3.1). Маржа одного бота ≤ 2% equity, Σ маржи контрактных ботов ≤ 4% equity (§3.1) — действует и для signal-ботов.
+- **4. План проверки на demo (5 шагов, только demo-эндпоинт `/pap/` и demo-API).**
+  1. `signal/create-signal` → получить channel ID (`signalChanId`) и token (`signalChanToken`). Token записать как секрет, в журнал и отчёты не копировать.
+  2. `signal/order-algo` → создать бота на `BTC-USDT-SWAP`, плечо **2x**, маржа **100 USDT** (`investAmt`), `subOrdType` 2 (market) или 9 (TradingView) по выбранному пути отправки.
+  3. Отправка тестового `ENTER_LONG`: либо demo-webhook `https://www.okx.com/pap/algo/signal/trigger` с JSON из п. 1, либо REST `signal/sub-order`. Записать время отправки и `timestamp`/`maxLag` для проверки свежести.
+  4. Проверка через `signal/positions` (и `signal/orders-algo-details`: `totalEq`, `floatPnl`): позиция открыта, `lever` 2x, маржа ≈ 100 USDT.
+  5. `signal/stop-order-algo` → проверить состояние позиции (ожидание: **осталась открытой**) → вызов `signal/close-position` (`algoId`, `instId`) → повторный запрос позиций пуст. Результат — факт в [okx-api.md](okx-api.md) §10 и закрытие §9 п. 11.
+- **5. Требования к kill-switch (кодовая задача, не выполнять в этом исследовании).**
+  - Включение сигнальных ботов в `src/connector.py:emergency_stop`: для каждого активного signal-бота вызвать `signal/stop-order-algo`.
+  - Так как остановки недостаточно (§п. 2 выше), обязателен второй шаг на каждого бота: **`signal/close-position`** для ликвидации висящих позиций; запасной путь — аварийный **`trade/close-position`**.
+  - Сейчас `emergency_stop` знает только семейства grid и DCA (§1.5: «Signal-ботов kill-switch не видит вообще») — это пробел §7 п. 3; закрывается вместе с С6 (HUNT-SIGNAL-BOT).
 - **Режим** задаёт сигнальная стратегия: mean-reversion или trend после гейта [backtester-design.md](backtester-design.md) §6.2.
-- **Для проекта** это вариант исполнителя будущей сигнальной стратегии. Код вызывает `risk.check_entry_allowed` и только после этого шлёт сигнал. Стоп, тейк и плечо живут в боте.
+- **Для проекта** это вариант исполнителя будущей сигнальной стратегии. Стоп, тейк и плечо живут в боте.
 - **Минусы.**
-  - `signalChanToken` — секрет: при утечке чужие сигналы исполнятся на нашем счёте.
-  - Kill-switch проекта signal-ботов не останавливает.
+  - `signalChanToken` — секрет: при утечке чужие сигналы исполнятся на нашем счёте. В репозиторий, журнал и отчёты его не писать (AGENTS.md §2, правая колонка — секреты).
+  - Kill-switch проекта signal-ботов не останавливает (требование выше).
   - Плечо фиксируется при создании.
-  - `stop-order-algo` без `stopType` — что будет с позициями, неизвестно (**проверить на demo**).
+  - Остановка без автозакрытия позиций — обязателен `close-position` (п. 2).
 - **Copy trading.** `profitSharingRatio` у signal bot в API нет. Лид-ботом его, по-видимому, не сделать (не подтверждено).
+- **Источники:** [И1] `signalBot/` (`signal`, `orderAlgoPlace`, `placeSubOrder`, `closePosition`, `amendTPSL`, `adjMarginBal`, `orderAlgoCancel`, `orderAlgoDetails`, `orderAlgoPosition`, `getSignals`, `setInstruments`); [И6] Signal bot alert message specifications + How to set up signal trading bot with TradingView (действия, `signalToken`, webhook live/demo); [И7] практика настройки signal-бота; внутренний опыт — §1.1/§1.5 (нет `stopType`, kill-switch без signal), `src/risk.py` (`check_entry_allowed`, `validate_stop_vs_liquidation`, breaker −6%), `src/connector.py:emergency_stop`.
 - **Оценка:** ценность средняя (позже) · сложность средняя · риск средний (операционный).
 
 ### С7. Funding carry через ботов — не применимо

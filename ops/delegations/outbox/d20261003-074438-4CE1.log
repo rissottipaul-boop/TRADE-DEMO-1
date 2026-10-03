@@ -1,0 +1,40 @@
+[stdout]
+Сделано: задача 27 (PANEL-LAUNCHER-DOCS) — документация фонового запуска панели, код не трогался (AGENTS.md §2 соблюдён: только docs, без guard/торговли/секретов).
+
+Изменённые файлы:
+- [ops/control-panel/README.md](/mnt/c/TG/BOT/TRADE DEMO 1/ops/control-panel/README.md) — новый раздел «Фоновый запуск»: команды `start`, `status`, `stop`, `restart`, `open`, `url`, `url -ShowToken` (+ параметры `-Port`/`-Token`), проверка своего процесса (PID + время создания + nonce), защита токена DPAPI (`data\control_panel_token.dpapi`, расшифровка в `src/control_panel_boot.py`, маскировка, удаление legacy `control_panel_token.txt`), коды выхода `status` (0 — здорова, 1 — ошибка).
+- [ops/code-map.md](/mnt/c/TG/BOT/TRADE DEMO 1/ops/code-map.md) — две новые строки в таблице файлов: `ops/panel.ps1` и `src/control_panel_boot.py` (со ссылкой на раздел «Фоновый запуск»).
+
+Проверки и результат:
+- `python3` inline-проверка форматирования: fences сбалансированы (README 4/4, code-map 0), все строки таблиц обоих файлов — ровно 2 ячейки, якорь `## Фоновый запуск` на месте. PASS.
+- `git diff --stat`: мои изменения — только `ops/code-map.md (+7)` и `ops/control-panel/README.md (+20)`; остальной diff — предсуществующие изменения дерева, не мои.
+- Тесты не запускались: изменение чисто документарное, код и тесты не затронуты; лаунчерные тесты (`tests/test_panel_launcher.py`) требуют Windows (Win32_Process/DPAPI).
+
+Доска: не менялась — статус задачи 27 выставляет оркестратор; фактов для новых задач нет.
+
+Дубликат уже учтённого результата `git diff` — нового нет. Итог прежний: задача 27 выполнена, изменены только [ops/control-panel/README.md](/mnt/c/TG/BOT/TRADE DEMO 1/ops/control-panel/README.md) (раздел «Фоновый запуск») и [ops/code-map.md](/mnt/c/TG/BOT/TRADE DEMO 1/ops/code-map.md) (2 строки), форматирование проверено — PASS.
+
+[stderr]
+tbh: ignoring unknown top-level member in settings file at /home/ttt/.config/muse/settings.json: reason=unknown_member location=settings
+muse: workspace root: /mnt/c/TG/BOT/TRADE DEMO 1 (cwd default)
+muse: warning: rules file at /mnt/c/TG/BOT/TRADE DEMO 1/AGENTS.md exists, but the workspace is untrusted, so it is skipped for this session; restart with --trust-workspace to load project rules
+muse: Skills: 23 loaded · 1 warning
+muse:   .agents: project-skills-untrusted: project skills skipped because workspace is untrusted
+muse:   Run `muse skills list --source all` for full diagnostics.
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `parallel_workers` is malformed; capability is inactive: invalid type: integer `10`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: plugins: runtime capability trust: runtime capability state `observer_agents` is malformed; capability is inactive: invalid type: boolean `true`, expected struct RuntimeCapabilityState
+muse: runtime capability `plugin:skill-reminder:reminder:skill-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:goal-reminder:reminder:goal-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:memory-reminder:reminder:memory-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:todo-reminder:reminder:todo-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:verify-reminder:reminder:verify-reminder` is inactive: reminder enablement settings are invalid
+muse: runtime capability `plugin:scope-reminder:reminder:scope-reminder` is inactive: reminder enablement settings are invalid
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+
+

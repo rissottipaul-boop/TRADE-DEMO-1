@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-10-03",
+  "comment": "Approved by user for all agents and services (task GUARD-COMPAT-APPLY)",
+  "clients": {
+    "claude": {
+      "verified": true
+    },
+    "codex": {
+      "verified": true
+    },
+    "gemini": {
+      "verified": true
+    },
+    "muse": {
+      "verified": true
+    }
+  }
+}

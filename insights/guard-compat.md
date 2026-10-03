@@ -118,3 +118,12 @@ Hook-команда вызывает **Windows**-python и в WSL: interop пр�
 - В текущей сессии Codex безвредная `echo withdraw-canary` выполнилась с кодом 0 и напечатала строку. Отказ hook не наблюдался; это не доказывает поведение новой доверенной сессии.
 - Отдельный `codex exec -s read-only -m gpt-6-astra --json` получил промпт только на две команды `echo guard-e2e-ok` и `echo withdraw-canary`. Обе не смогли запустить shell: Windows вернула `CreateProcessAsUserW failed: 5 (Отказано в доступе.)`. Клиент сам отметил, что отказ project hook не зафиксирован. Этот результат нельзя считать ни пропуском, ни успешным отказом guard.
 - Вывод тестового клиента сохранён в `logs/guard-e2e-codex.jsonl`. В `data/guard.log` нет отказов с `client: codex`; E2E остаётся открытым. Следующая попытка должна проверить загрузку hook и trust в новой сессии, не подменяя отказ guard ошибкой ОС.
+
+## Проверка Muse/Gemini/Codex 30.09, 23:00 (+05:00, Insight Executor / Muse)
+
+- `tests.test_guard` + `tests.test_guard_adapter` — **61/61 OK без skip**; `lint_hook_config` применённых конфигов — `{'gemini': [], 'codex': [], 'muse': []}`.
+- **Muse, API-сессия (эта): hook не исполняется.** Контроль `echo guard-e2e-ok` прошёл; `echo withdraw-canary` напечатана (exit 0); файл `.github/hooks/e2e-canary.txt` создан без отказа. В `data/guard.log` новых строк нет (34, ни `trace`, ни `deny` с `client`). Канарейка удалена сразу, отсутствие проверено. Вывод: project hooks (`.muse/hooks.json`) на вызовы инструментов в API-сессии Muse Code не действуют — это отдельный от TUI-trust случай. Интерактивный `muse` с trust не проверен.
+- **Мост Muse из песочницы недоступен:** `ops/muse.cmd` идёт через `wsl -d Ubuntu-22.04`, а `wsl -l -q` пуст — обе ветки (untrusted без trace, `--trust-workspace` с deny) остаются за интерактивной сессией.
+- **Gemini 0.62.0 headless (`-p` со сценарием): не запустился** — требует Auth (GEMINI_API_KEY, Vertex/GCA или интерактивный OAuth), плюс EPERM на `~/.gemini/projects.json` из песочницы. Вызовов модели и инструментов не было.
+- **Codex 0.159.2 headless (`exec -s read-only -m gpt-6-astra --json`, 2 echo): не запустился** — 401 Unauthorized (нет API-токена в окружении), остановлен после 5 ретраев. Ошибка 18:07 (CreateProcessAsUserW 5) не повторилась — упал раньше, на auth.
+- `data/GUARD_TRACE` на время проверки создавался и удалён; посторонних файлов не осталось. Критерий GUARD-COMPAT-APPLY не подтверждён: нужны три интерактивные доверенные сессии с канарейками 1–3.

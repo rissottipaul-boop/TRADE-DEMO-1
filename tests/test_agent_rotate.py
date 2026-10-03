@@ -68,7 +68,8 @@ class AgentRotateTests(unittest.TestCase):
             (ROOT / "ops/agent-routing.json").read_text(encoding="utf-8-sig")
         )
 
-    def run_launcher(self, *, available=RUNTIMES, exit_code=0, output="ok", **parameters):
+    def run_launcher(self, *, available=RUNTIMES, exit_code=0, output="ok",
+                     guard_status=None, **parameters):
         with tempfile.TemporaryDirectory(prefix="agent-rotate-test-") as temporary:
             # Песочница может вернуть путь с префиксом \\?\ — Join-Path в
             # Windows PowerShell 5.1 такие пути не разбирает («drive» is null).
@@ -80,6 +81,8 @@ class AgentRotateTests(unittest.TestCase):
             registry = json.loads(json.dumps(self.registry))
             for name, runtime in registry["runtimes"].items():
                 runtime["command"] = "__agent_rotate_test_" + name
+                if guard_status is not None:
+                    runtime["guard_status"] = guard_status
             (project / "ops/agent-routing.json").write_text(
                 json.dumps(registry), encoding="utf-8"
             )
@@ -99,14 +102,18 @@ class AgentRotateTests(unittest.TestCase):
             logs_path = project / "logs/agent-rotate.log"
             calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8-sig").splitlines()] if calls_path.exists() else []
             logs = [json.loads(line) for line in logs_path.read_text(encoding="utf-8-sig").splitlines()] if logs_path.exists() else []
-            return SimpleNamespace(
+            result_ns = SimpleNamespace(
                 code=result.returncode, stdout=result.stdout, stderr=result.stderr,
                 calls=calls, logs=logs, log_directory=(project / "logs").exists(),
                 project=str(project),
             )
+        # Пояс: TemporaryDirectory молча оставляет каталог, если файлы залипли
+        # (убитый по таймауту pwsh на Windows) — добиваем явно (TEST-TEMP-CLEANUP).
+        shutil.rmtree(project, ignore_errors=True)
+        return result_ns
 
-    def plan(self, **parameters):
-        result = self.run_launcher(Plan=True, **parameters)
+    def plan(self, *, guard_status=None, **parameters):
+        result = self.run_launcher(Plan=True, guard_status=guard_status, **parameters)
         self.assertEqual(result.code, 0, result.stderr)
         self.assertEqual(result.calls, [], "-Plan не должен вызывать CLI")
         self.assertFalse(result.log_directory, "-Plan не должен создавать logs")
@@ -141,8 +148,15 @@ class AgentRotateTests(unittest.TestCase):
                     self.assertEqual(arguments[arguments.index("--model") + 1], candidate["model"])
                     self.assertIn(config["file"], arguments[-1])
                     self.assertIn("T42", arguments[-1])
-                    if candidate["agent"] in {"codex", "gemini", "muse"}:
-                        self.assertIn("разрешены только анализ, чтение и рекомендации", arguments[-1])
+                    # Guard e2e-verified: ограничение на анализ снято, автономия включена.
+                    self.assertNotIn("разрешены только анализ, чтение и рекомендации", arguments[-1])
+                    if candidate["agent"] == "codex":
+                        self.assertEqual(arguments[arguments.index("--sandbox") + 1], "workspace-write")
+                        self.assertIn("sandbox_workspace_write.network_access=true", arguments)
+                    if candidate["agent"] == "gemini":
+                        self.assertEqual(arguments[arguments.index("--approval-mode") + 1], "yolo")
+                    if candidate["agent"] == "muse":
+                        self.assertIn("--trust-workspace", arguments)
 
     def test_prompt_points_to_token_economy_and_addressed_board_read(self):
         with_task = self.plan(Role="insight-executor", TaskId="T42")
@@ -163,11 +177,27 @@ class AgentRotateTests(unittest.TestCase):
         for candidate in plan["candidates"]:
             if candidate["agent"] == "codex":
                 self.assertEqual(candidate["model"], self.registry["runtimes"]["codex"]["default_model"])
-                self.assertIn("разрешены только анализ, чтение и рекомендации", candidate["arguments"][-1])
+                self.assertNotIn("разрешены только анализ, чтение и рекомендации", candidate["arguments"][-1])
             else:
                 self.assertIsNone(candidate["model"])
                 self.assertNotIn("--model", candidate["arguments"])
                 self.assertNotIn("разрешены только анализ, чтение и рекомендации", candidate["arguments"][-1])
+
+    def test_unverified_guard_restores_analysis_only_restrictions(self):
+        plan = self.plan(Role="insight-executor", TaskId="T42", guard_status="pending")
+        for candidate in plan["candidates"]:
+            arguments = candidate["arguments"]
+            if candidate["agent"] in {"codex", "gemini", "muse"}:
+                self.assertIn("разрешены только анализ, чтение и рекомендации", arguments[-1])
+            else:
+                self.assertNotIn("разрешены только анализ, чтение и рекомендации", arguments[-1])
+            if candidate["agent"] == "codex":
+                self.assertEqual(arguments[arguments.index("--sandbox") + 1], "read-only")
+                self.assertNotIn("sandbox_workspace_write.network_access=true", arguments)
+            if candidate["agent"] == "gemini":
+                self.assertEqual(arguments[arguments.index("--approval-mode") + 1], "plan")
+            if candidate["agent"] == "muse":
+                self.assertNotIn("--trust-workspace", arguments)
 
     def test_skip_alias_and_explicit_antigravity_alias(self):
         plan = self.plan(SkipAgent=["claude", "antigravity"])
@@ -200,9 +230,11 @@ class AgentRotateTests(unittest.TestCase):
                 self.assertEqual(sum(prompt in argument for argument in arguments), 1)
                 expected = {
                     "claude": ["--print", "--output-format", "text", "--model", "test-model", "--"],
-                    "gemini": ["--model", "test-model", "--prompt"],
-                    "muse": ["exec", "--model", "test-model", "--"],
-                    "codex": ["--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--cd", result.project, "--model", "test-model", "--"],
+                    "gemini": ["--approval-mode", "yolo", "--model", "test-model", "--prompt"],
+                    "muse": ["exec", "--trust-workspace", "--model", "test-model", "--"],
+                    "codex": ["--ask-for-approval", "never", "exec", "--sandbox", "workspace-write",
+                              "-c", "sandbox_workspace_write.network_access=true",
+                              "--cd", result.project, "--model", "test-model", "--"],
                 }[agent]
                 self.assertEqual(arguments[:-1], expected)
                 self.assertEqual([line["event"] for line in result.logs], ["start", "finish"])

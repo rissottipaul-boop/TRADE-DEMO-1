@@ -6,6 +6,11 @@
     A started prompt is NEVER replayed automatically. Record a handoff on the
     board, then use -SkipAgent for an exhausted provider.
     Antigravity remains an alias for Gemini CLI; agy is a separate client.
+    Autonomy is data-driven: when a runtime's guard_status in
+    ops/agent-routing.json is 'e2e-verified' (per ops/hooks/launch-e2e.json),
+    the launcher drops the analysis-only prefix and read-only sandbox and runs
+    the client in full-auto mode. The project guard hook stays mandatory and
+    still denies the protected actions from AGENTS.md §2.
 .EXAMPLE
     ops\agent-rotate.ps1 -Role insight-executor -Plan
     ops\agent-rotate.ps1 -Agent codex -Role insight-executor -Prompt "Review T42"
@@ -60,8 +65,9 @@ foreach ($runtimeName in $order) {
                      elseif ($Role) { $roleConfig.models.$runtimeName }
                      elseif ($runtimeName -eq 'codex') { $runtime.default_model }
                      else { $null }
+    $guardVerified = ($runtime.guard_status -eq 'e2e-verified')
     $taskPrompt = $context + $Prompt
-    if ($runtimeName -eq 'codex' -or ($Role -and $runtimeName -in @('gemini', 'muse'))) {
+    if (-not $guardVerified -and ($runtimeName -eq 'codex' -or ($Role -and $runtimeName -in @('gemini', 'muse')))) {
         $taskPrompt = 'Для этого запуска разрешены только анализ, чтение и рекомендации: интеграция guard ещё не проверена. Не выполняй торговые и другие изменяющие внешнее состояние действия. ' + $taskPrompt
     }
     $cliArgs = @()
@@ -72,20 +78,27 @@ foreach ($runtimeName in $order) {
             $cliArgs += @('--', $taskPrompt)
         }
         'gemini' {
-            if ($Role) { $cliArgs += @('--approval-mode', 'plan') }
+            if ($guardVerified) { $cliArgs += @('--approval-mode', 'yolo') }
+            elseif ($Role) { $cliArgs += @('--approval-mode', 'plan') }
             if ($selectedModel) { $cliArgs += @('--model', $selectedModel) }
             if ($Headless) { $cliArgs += @('--prompt', $taskPrompt) }
             else { $cliArgs += @('--prompt-interactive', $taskPrompt) }
         }
         'muse' {
             if ($Headless) { $cliArgs += 'exec' }
+            if ($guardVerified) { $cliArgs += '--trust-workspace' }
             if ($selectedModel) { $cliArgs += @('--model', $selectedModel) }
             $cliArgs += @('--', $taskPrompt)
         }
         'codex' {
             $cliArgs += @('--ask-for-approval', 'never')
             if ($Headless) { $cliArgs += 'exec' }
-            $cliArgs += @('--sandbox', 'read-only', '--cd', $projectRoot, '--model', $selectedModel)
+            if ($guardVerified) {
+                $cliArgs += @('--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true')
+            } else {
+                $cliArgs += @('--sandbox', 'read-only')
+            }
+            $cliArgs += @('--cd', $projectRoot, '--model', $selectedModel)
             $cliArgs += @('--', $taskPrompt)
         }
     }
