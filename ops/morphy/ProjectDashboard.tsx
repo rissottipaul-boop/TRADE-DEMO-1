@@ -8,6 +8,7 @@ import {
   Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from 'recharts';
 
+// @ts-ignore -- CSS обрабатывается сборщиком; объявления типов для него отсутствуют.
 import './project.css';
 import DotMeter from './project/DotMeter';
 import { SkeletonCard, SkeletonGroup, SkeletonPanel } from './project/Skeleton';
