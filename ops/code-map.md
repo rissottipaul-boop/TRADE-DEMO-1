@@ -24,6 +24,7 @@
 | `src/morphy_project.py` + `ops/morphy/` | Экран общего проекта в локальном Morphy: read-only проекция единой доски, карточки задач, риск/движок, equity, AI-рантаймы, очередь Muse, Netdata, Obsidian, Telegram, Git и модули. API требует существующую сессию Morphy; не запускает агентов и не меняет торговлю — [инструкция](morphy/README.md) |
 | `src/worktree_lease.py` | Резервирование задачи и изолированного Git worktree от чистого HEAD, heartbeat и инспекция регистрации; не запускает агента и не освобождает lease автоматически |
 | `src/guard_adapter.py` | Адаптер hook-вызовов Codex / Gemini CLI / Muse Code к `ops/hooks/guard.py` (AGENT-GUARD-COMPAT): `apply_patch` в `command`, `cmd`/argv, вложенные вызовы, `BeforeTool`, пути WSL, корень с пробелами; ответ в формате клиента, правил не содержит. Hooks пока не вызывают: патч `insights/guard-compat-patch.diff` переносит его в `ops/hooks/` (решение человека, [guard-compat.md](../insights/guard-compat.md)) |
+| `src/perimeter.py` | Сверка файлов периметра guard с HEAD (PERIMETER-DRIFT-CHECK): состав — импортом из `ops/hooks/guard.py` (`GUARDRAIL_FILES`, `GUARDRAIL_DIRS`, `RISK_FILE`), статус clean / modified / untracked / deleted / absent и mtime по каждому файлу. Содержимое сравнивается по хешам blob (`git ls-tree` против `git hash-object` без записи), кэш индекса не используется; `__pycache__` только считается. Только чтение git и mtime |
 | `src/order_owner.py`, `src/order_audit.py` | Реестр владельцев ордеров (префикс clOrdId → владелец) и аудит «чей ордер» (только чтение) |
 | `src/live_policy.py`, `src/live_preflight.py`, `src/live_runner.py` | Live-карман: окно и карман, предстартовая проверка (только чтение), runner рукава DCA (фоном — `ops\live.ps1`) |
 | `src/pnl_ledger.py` + `ops/sleeves.json` | PnL по рукавам из bills (только чтение), отчёт за день или неделю; правила атрибуции; методика — `insights/pnl-ledger.md` |
@@ -58,6 +59,7 @@
 | Проверка сторожа | `python -m src.engine_watchdog [--json]` — только вердикт: 0 — делать нечего, 1 — нужен перезапуск, 2 — ошибка; `ops\autostart.ps1 watch` — как по расписанию: повтор через 90 с, `engine.ps1 stop` + `start`, не больше 3 перезапусков в час |
 | Риск и метрики | `python -m src.ops status` |
 | Аварийная остановка торговли | `python -m src.ops kill "причина"` |
+| Дрейф периметра guard | `python -m src.ops perimeter [--json]` (то же — `python -m src.perimeter`): каждый файл периметра против HEAD — статус и mtime. 0 — расхождений нет; 1 — есть modified, untracked (в том числе под `.gitignore`) или deleted; 2 — сверка невозможна (нет git или HEAD, guard не импортируется). Без сети и ключей, ничего не пишет; в чек-листе Ops Sentinel |
 | Биржа (только demo) | `okx --demo <module> <action> …`, скиллы в `.agents/skills/` |
 | Чьи ордера на счёте | `python -m src.order_audit [--hours 24]` — 0: норма, 1: есть ордер без метки агента или кода, 2: ошибка чтения |
 | Реестр и новый clOrdId | `python -m src.order_owner`, `python -m src.order_owner new trd` |

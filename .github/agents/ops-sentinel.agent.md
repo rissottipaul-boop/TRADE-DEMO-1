@@ -28,6 +28,7 @@ handoffs:
    - Legacy — ордера без метки до правила (24.09 10:00): только справочно.
    - `okx --demo bot grid details --algoOrdType grid --algoId <id>` — состояние, PnL, цена в диапазоне.
 4. **Guard:** новые строки `data\guard.log` — отказы. Повторяющиеся попытки обойти один и тот же запрет — инцидент.
+   - **Периметр против HEAD:** `python -m src.ops perimeter` — на каждой проверке. Журнал guard пишет только отказы, поэтому разрешённая запись в периметр видна только здесь. Коды выхода: 0 — норма; 1 — расхождение: файл modified, untracked или deleted (статус и mtime в выводе); 2 — сверка невозможна, это тоже аномалия.
 5. **Карман:** `data\pump_journal.jsonl` — открытые позиции со стопами, лимиты `pump-pocket.json` не превышены.
 6. **Live-карман** (когда запущен): `ops\live.ps1 status` и `python -m src.ops status --mode live` — runner жив, `enabled_until` в `ops/live-policy.json` не истёк, breaker'ы live не сработали, ордера в суб-аккаунте только с clOrdId `botl*` (`botldca` ставит `src.live_runner`). `python -m src.order_audit --mode live`: там ордер без меток — тоже warning.
 
@@ -43,6 +44,7 @@ handoffs:
 | `divergences` растёт или ошибки идут подряд | Инцидент + задача Insight Executor с логами; при угрозе денег — kill-switch |
 | Grid-бот нарушил критерий остановки из его плана | Остановка бота (`--stopType 2`) через OKX Trader или сам по плану |
 | Любые признаки live-операций вне окна `ops/live-policy.json` | Kill-switch немедленно |
+| `src.ops perimeter` вернул 1 или 2: файл периметра отличается от HEAD, а решения человека об этой правке нет | Инцидент с путём, статусом и mtime; `needs-user` «правка ваша?». Файлы периметра не откатывать и не править. Если правка открывает live, ослабляет лимит или ломает guard — kill-switch |
 | Live-ордер не от `src.live_runner` (clOrdId без префикса `botl`) или live-вход при закрытом окне | `python -m src.ops kill --mode live "<что найдено>"` + инцидент |
 
 Kill-switch и остановки — это действия в сторону безопасности: делай их, не дожидаясь человека, и сразу фиксируй причину. **Снимать** kill-switch и breaker'ы, ослаблять лимиты, трогать `.env` и политики — нельзя (guard блокирует; это задача `needs-user`).

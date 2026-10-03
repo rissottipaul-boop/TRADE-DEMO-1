@@ -13,6 +13,9 @@ demo — data/risk_state.db и data/bot_state.db, live — data/live/.
     python -m src.ops kill --keep-bots           # то же, но нативных grid- и DCA-ботов не трогать
     python -m src.ops kill --mode live "причина" # аварийная остановка live-кармана
     python -m src.ops reset kill|global|daily    # ручной сброс (только человек)
+    python -m src.ops perimeter [--json]         # файлы периметра guard против HEAD: статус и mtime;
+                                                 # 0 — чисто, 1 — расхождение, 2 — сверка невозможна
+                                                 # (только чтение git, src/perimeter.py)
 
 --mode — только ПОСЛЕ команды (по умолчанию OKX_MODE из окружения, иначе demo).
 Опций перед командой нет намеренно: правило guard для `src.ops reset` (сброс —
@@ -24,7 +27,7 @@ import logging
 import sys
 from typing import Optional
 
-from . import risk
+from . import perimeter, risk
 from .config import MODES, StatePaths, default_mode, load_settings, state_paths
 from .connector import create_exchange, emergency_stop
 from .storage import Storage
@@ -92,6 +95,11 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_perimeter(args: argparse.Namespace) -> int:
+    # Без риск-ядра и биржи: только git и mtime (PERIMETER-DRIFT-CHECK)
+    return perimeter.run(args.root, args.json)
+
+
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(prog="python -m src.ops", description=__doc__.splitlines()[0])
@@ -109,8 +117,11 @@ def main(argv=None) -> int:
     reset = sub.add_parser("reset", parents=[mode_opt], help="ручной сброс kill-switch / breaker")
     reset.add_argument("scope", choices=("kill", "global", "daily"))
     reset.set_defaults(func=cmd_reset)
+    drift = sub.add_parser("perimeter", help="файлы периметра guard против HEAD (только чтение git)")
+    perimeter.add_arguments(drift)
+    drift.set_defaults(func=cmd_perimeter)
     args = parser.parse_args(argv)
-    if args.mode is None:
+    if "mode" in vars(args) and args.mode is None:  # у perimeter режима нет
         args.mode = default_mode()
     return args.func(args)
 
